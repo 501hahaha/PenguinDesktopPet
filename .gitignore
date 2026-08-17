@@ -1,0 +1,88 @@
+# ---- Dependencies ----
+node_modules/
+
+# ---- Build output ----
+out/
+dist/
+
+# ---- Local-only product architecture notes ----
+docs/private-plans/
+
+# ---- Release artifacts (must never be committed) ----
+release/
+
+# ---- Environment & secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- Local editor / IDE ----
+.vscode/
+.idea/
+.DS_Store
+
+# ---- Local tooling state ----
+.codex/
+.claude/
+
+# ---- Runtime data: credentials, sessions, databases, backups, logs ----
+*.log
+*.log.*
+app-restart.*.log
+.runtime-logs/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.jsonl
+*.jsonl.*
+*.backup
+*.bak
+*~
+*.swp
+*.swo
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.crt
+*.jks
+*.keystore
+*.snap
+*.sig
+*.asc
+*.crx
+!*.example
+!*.template
+
+# ---- Test / coverage / diagnostics ----
+coverage/
+*.lcov
+.nyc_output/
+*.sarif
+diag-export/
+diagnostics/
+*.dmp
+
+# ---- Media (large binaries; keep source documents) ----
+/video/*.mp4
+/video/alpha/*.mov
+
+# ---- Local QA captures and analysis ----
+# These files can contain desktop screenshots, chat content, account names,
+# display topology, or private test data. Keep them outside the public tree.
+/screenshots/
+/display-check-*/
+/actual-primary-fullscreen.png
+/after-prompt-sent.png
+/current-page-screenshot.png
+/current-primary-fullscreen.png
+/external-agent-screen-*.png
+/external-fullscreen-*.png
+/full-screen-*.png
+/fullscreen-*.png
+/primary-screen-screenshot.png
+/verify-chatgpt-send.png
+/gain_area_length_analysis.xlsx
+/video/cat/

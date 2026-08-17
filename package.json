@@ -1,0 +1,85 @@
+{
+  "name": "penguin-desktop-pet",
+  "version": "1.0.8",
+  "private": true,
+  "description": "A transparent Electron desktop pet built around the supplied penguin artwork.",
+  "main": "out/main/main.js",
+  "scripts": {
+    "prebuild": "node scripts/create-icons.mjs",
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit",
+    "start": "electron .",
+    "release:check": "node scripts/check-public-release.mjs",
+    "release:checksums": "node scripts/create-checksums.mjs",
+    "package:dir": "npm run build && electron-builder --dir --win --x64",
+    "package:win": "npm run build && electron-builder --win nsis portable --x64"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/three": "^0.185.4",
+    "electron": "^37.2.6",
+    "electron-builder": "^26.0.12",
+    "electron-vite": "^4.0.0",
+    "pngjs": "^5.0.0",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.0"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.73.0",
+    "@tencent-connect/qqbot-connector": "^1.2.0",
+    "@tencent-connect/qqbot-nodejs": "^1.0.4",
+    "@types/qrcode": "^1.5.6",
+    "dingtalk-stream": "2.1.5",
+    "qrcode": "^1.5.4",
+    "three": "^0.185.1"
+  },
+  "build": {
+    "appId": "com.penguin.desktop.pet",
+    "productName": "Penguin Desktop Pet",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "video/alpha-webm/**/*",
+      "video/抠图/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "PenguinDesktopPet-${version}-${os}-${arch}.${ext}",
+      "icon": "build/penguin-icon.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": false,
+      "artifactName": "PenguinDesktopPet-${version}-win-${arch}-setup.${ext}"
+    },
+    "portable": {
+      "artifactName": "PenguinDesktopPet-${version}-win-${arch}-portable.${ext}"
+    },
+    "extraResources": [
+      {
+        "from": "build/penguin-icon.png",
+        "to": "penguin-icon.png"
+      }
+    ]
+  }
+}

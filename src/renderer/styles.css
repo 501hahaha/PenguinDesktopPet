@@ -1,0 +1,1022 @@
+:root {
+  --pet-window-width: 280px;
+  --pet-window-height: 340px;
+  color-scheme: light;
+  font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+}
+
+html,
+body,
+#app {
+  /* Keep the renderer viewport tied to the native pet window. This prevents a
+     late transparent-HWND compositor resize from stretching the hit surface. */
+  width: var(--pet-window-width);
+  height: var(--pet-window-height);
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+body {
+  user-select: none;
+}
+
+button {
+  font: inherit;
+}
+
+.pet-shell {
+  position: relative;
+  width: var(--pet-window-width);
+  height: var(--pet-window-height);
+  cursor: grab;
+  /* Dragging is driven by the native cursor position in main.ts. Keeping the
+     web content out of Chromium's rectangular app-region avoids a second,
+     different drag coordinate system on transparent windows. */
+  -webkit-app-region: no-drag;
+}
+
+.pet-shell:active {
+  cursor: grabbing;
+}
+
+.pet-card {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+}
+
+.pet-visual {
+  position: relative;
+  width: 280px;
+  height: 280px;
+  flex: 0 0 280px;
+  --pet-status-center-x: 50%;
+  --pet-status-center-y: 50%;
+  --pet-status-marker-size: 13px;
+  --pet-status-marker-half: 6.5px;
+  --pet-status-orbit-radius-x: 86px;
+  --pet-status-orbit-radius-y: 72px;
+  --pet-status-wingman-offset-x: 116px;
+  --pet-status-wingman-sway-x-near: 12px;
+  --pet-status-wingman-sway-x-mid: 24px;
+  --pet-status-wingman-radius-y: 19px;
+  --pet-status-wingman-edge-rebound-x: 34px;
+  --pet-status-wingman-thinking-duration: 560ms;
+  --pet-status-static-edge-rebound-x: 18px;
+  --pet-status-top-rebound-y: 18px;
+  --pet-status-orbit-duration: 5.8s;
+  --pet-status-square-duration: 5.2s;
+  --pet-status-orbit-thinking-duration: 2.4s;
+  --pet-status-square-thinking-duration: 2.2s;
+}
+
+.status-light {
+  position: absolute;
+  /* Static left-top placement uses the same calibrated center and radii as the orbit/square paths. */
+  top: calc(var(--pet-status-center-y) - var(--pet-status-orbit-radius-y) - var(--pet-status-marker-half));
+  left: calc(var(--pet-status-center-x) - var(--pet-status-orbit-radius-x) - var(--pet-status-marker-half));
+  z-index: 3;
+  width: var(--pet-status-marker-size);
+  height: var(--pet-status-marker-size);
+  border-radius: 50%;
+  background: #46d181;
+  box-shadow: 0 0 14px rgba(70, 209, 129, 0.78);
+  display: block;
+  cursor: help;
+  pointer-events: auto;
+  transition: background 220ms ease, box-shadow 220ms ease, filter 180ms ease, left 320ms cubic-bezier(0.22, 1, 0.36, 1), top 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.status-light:hover,
+.status-light:focus-visible {
+  filter: brightness(1.12) saturate(1.08);
+}
+
+.status-light:focus-visible {
+  outline: 2px solid rgba(70, 209, 129, 0.65);
+  outline-offset: 3px;
+}
+
+.status-light[hidden],
+.perception-status-label[hidden] {
+  display: none;
+}
+
+.status-light[data-phase="working"],
+.status-light[data-phase="starting"] {
+  background: #9c8bc8;
+  box-shadow: 0 0 14px rgba(156, 139, 200, 0.78);
+}
+
+.status-light[data-phase="waiting"],
+.status-light[data-phase="unknown"] {
+  background: #e0ad62;
+  box-shadow: 0 0 14px rgba(224, 173, 98, 0.72);
+}
+
+.status-light[data-phase="offline"],
+.status-light[data-phase="error"] {
+  background: #c47a98;
+  box-shadow: 0 0 14px rgba(196, 122, 152, 0.72);
+}
+
+.status-light[data-motion="orbit"] {
+  /* The pet silhouette calibrates this center once per style; the orbit stays fixed after that. */
+  top: calc(var(--pet-status-center-y) - var(--pet-status-marker-half));
+  left: calc(var(--pet-status-center-x) + var(--pet-status-orbit-radius-x) - var(--pet-status-marker-half));
+  transform-origin: calc(0px - var(--pet-status-orbit-radius-x) + var(--pet-status-marker-half)) 50%;
+  animation: status-light-orbit var(--pet-status-orbit-duration) linear infinite;
+}
+
+.status-light[data-motion="square"] {
+  top: calc(var(--pet-status-center-y) - var(--pet-status-marker-half));
+  left: calc(var(--pet-status-center-x) - var(--pet-status-marker-half));
+  animation: status-light-square var(--pet-status-square-duration) linear infinite;
+}
+
+.status-light[data-motion="wingman"] {
+  top: calc(var(--pet-status-center-y) - var(--pet-status-marker-half));
+  left: calc(var(--pet-status-center-x) + var(--pet-status-wingman-offset-x) - var(--pet-status-marker-half));
+  animation: status-light-wingman 2.8s ease-in-out infinite;
+}
+
+.status-light[data-edge="left"][data-motion="static"] {
+  left: 221px;
+  animation: status-light-left-edge-bounce 520ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+}
+
+@keyframes status-light-left-edge-bounce {
+  0% { transform: translateX(-18px); }
+  62% { transform: translateX(3px); }
+  100% { transform: translateX(0); }
+}
+
+.status-light[data-top-edge="top"][data-motion="static"] {
+  top: calc(var(--pet-status-center-y) - var(--pet-status-orbit-radius-y) - var(--pet-status-marker-half) + var(--pet-status-top-rebound-y));
+  animation: status-light-top-edge-bounce 520ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+}
+
+@keyframes status-light-top-edge-bounce {
+  0% { transform: translateY(calc(0px - var(--pet-status-top-rebound-y))); }
+  62% { transform: translateY(3px); }
+  100% { transform: translateY(0); }
+}
+
+.status-light[data-edge="right"][data-motion="static"] {
+  left: calc(var(--pet-status-center-x) - var(--pet-status-orbit-radius-x) - var(--pet-status-marker-half) - var(--pet-status-static-edge-rebound-x));
+  animation: status-light-right-edge-bounce 520ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+}
+
+@keyframes status-light-right-edge-bounce {
+  0% { transform: translateX(var(--pet-status-static-edge-rebound-x)); }
+  62% { transform: translateX(-3px); }
+  100% { transform: translateX(0); }
+}
+
+.status-light[data-edge="left"][data-motion="wingman"] {
+  left: calc(var(--pet-status-center-x) + var(--pet-status-wingman-offset-x) - var(--pet-status-marker-half));
+  animation-name: status-light-wingman-left-edge;
+}
+
+.status-light[data-edge="right"][data-motion="wingman"] {
+  /* Pull the wingman inward before the transparent pet window reaches the right edge. */
+  left: calc(var(--pet-status-center-x) + var(--pet-status-wingman-offset-x) - var(--pet-status-marker-half) - var(--pet-status-wingman-edge-rebound-x));
+  animation-name: status-light-wingman-right-edge;
+}
+
+@keyframes status-light-orbit {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes status-light-square {
+  0%, 20%, 100% {
+    transform: translate(calc(0px - var(--pet-status-orbit-radius-x)), calc(0px - var(--pet-status-orbit-radius-y)));
+  }
+  25%, 45% {
+    transform: translate(var(--pet-status-orbit-radius-x), calc(0px - var(--pet-status-orbit-radius-y)));
+  }
+  50%, 70% {
+    transform: translate(var(--pet-status-orbit-radius-x), var(--pet-status-orbit-radius-y));
+  }
+  75%, 95% {
+    transform: translate(calc(0px - var(--pet-status-orbit-radius-x)), var(--pet-status-orbit-radius-y));
+  }
+}
+
+@keyframes status-light-wingman {
+  0%, 100% { transform: translate(0, 0); }
+  18% { transform: translate(calc(0px - var(--pet-status-wingman-sway-x-near)), var(--pet-status-wingman-radius-y)); }
+  38% { transform: translate(var(--pet-status-wingman-sway-x-near), 5px); }
+  56% { transform: translate(calc(0px - var(--pet-status-wingman-sway-x-mid)), calc(0px - var(--pet-status-wingman-radius-y))); }
+  76% { transform: translate(var(--pet-status-wingman-sway-x-near), -5px); }
+}
+
+@keyframes status-light-wingman-left-edge {
+  0%, 100% { transform: translate(0, 0); }
+  25% { transform: translate(0, var(--pet-status-wingman-radius-y)); }
+  50% { transform: translate(0, 3px); }
+  75% { transform: translate(0, calc(0px - var(--pet-status-wingman-radius-y))); }
+}
+
+@keyframes status-light-wingman-right-edge {
+  0% { transform: translateX(12px); }
+  22% { transform: translateX(calc(0px - var(--pet-status-wingman-edge-rebound-x))); }
+  48% { transform: translate(-18px, 10px); }
+  72% { transform: translate(-8px, -9px); }
+  100% { transform: translate(0, 0); }
+}
+
+.status-light[data-motion="wingman"][data-activity="thinking"] {
+  /* Thinking uses quick, irregular motion on one horizontal axis. */
+  animation: status-light-wingman-thinking var(--pet-status-wingman-thinking-duration) linear infinite;
+}
+
+@keyframes status-light-wingman-thinking {
+  0%, 100% { transform: translate(0, 0); }
+  10% { transform: translate(-8px, 7px); }
+  22% { transform: translate(9px, -8px); }
+  35% { transform: translate(18px, 13px); }
+  48% { transform: translate(-12px, -16px); }
+  61% { transform: translate(24px, 3px); }
+  74% { transform: translate(-20px, 16px); }
+  87% { transform: translate(10px, -12px); }
+}
+
+.status-light[data-edge="right"][data-motion="wingman"][data-activity="thinking"] {
+  left: calc(var(--pet-status-center-x) + var(--pet-status-wingman-offset-x) - var(--pet-status-marker-half) - var(--pet-status-wingman-edge-rebound-x));
+  animation: status-light-wingman-right-edge-thinking var(--pet-status-wingman-thinking-duration) linear infinite;
+}
+
+@keyframes status-light-wingman-right-edge-thinking {
+  0% { transform: translate(12px, 0); }
+  12% { transform: translate(-24px, 9px); }
+  27% { transform: translate(-42px, -5px); }
+  42% { transform: translate(-14px, -17px); }
+  58% { transform: translate(-50px, 8px); }
+  74% { transform: translate(-28px, 17px); }
+  88% { transform: translate(-8px, -9px); }
+  100% { transform: translate(12px, 0); }
+}
+
+.perception-status-label {
+  position: absolute;
+  top: 39px;
+  left: 42px;
+  z-index: 2;
+  max-width: 190px;
+  overflow: hidden;
+  padding: 7px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.78);
+  border-radius: 11px 5px 11px 11px;
+  color: #65748b;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 5px 14px rgba(93, 112, 161, 0.18), 0 0 0 1px rgba(194, 211, 246, 0.32);
+  font-size: 9px;
+  line-height: 1.3;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-4px) scale(0.96);
+  transform-origin: top left;
+  transition: opacity 160ms ease, visibility 160ms ease, transform 160ms ease;
+}
+
+.status-light[data-motion="static"] + .perception-status-label {
+  top: calc(var(--pet-status-center-y) - var(--pet-status-orbit-radius-y) + 15px);
+  left: calc(var(--pet-status-center-x) - var(--pet-status-orbit-radius-x) - 6px);
+}
+
+.status-light[data-top-edge="top"][data-motion="static"] + .perception-status-label {
+  top: calc(var(--pet-status-center-y) - var(--pet-status-orbit-radius-y) + 15px + var(--pet-status-top-rebound-y));
+}
+
+.status-light:hover + .perception-status-label,
+.status-light:focus-visible + .perception-status-label {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0) scale(1);
+}
+
+.status-light[data-motion="wingman"] + .perception-status-label {
+  top: 106px;
+  right: 12px;
+  left: auto;
+  transform-origin: top right;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-light[data-motion="orbit"],
+  .status-light[data-motion="square"],
+  .status-light[data-motion="wingman"],
+  .status-light[data-edge="left"][data-motion="wingman"] {
+    animation-duration: 12s;
+  }
+}
+
+:root[data-theme="night"] .perception-status-label {
+  border-color: rgba(119, 132, 161, 0.48);
+  color: #d1d8e6;
+  background: rgba(34, 39, 52, 0.94);
+  box-shadow: 0 6px 16px rgba(8, 10, 16, 0.34);
+}
+
+.task-tray-toggle {
+  position: absolute;
+  right: 50%;
+  top: var(--pet-dock-top, 288px);
+  bottom: auto;
+  transform: translateX(50%);
+  z-index: 7;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid rgba(188, 208, 238, 0.64);
+  border-radius: 12px;
+  color: #58709a;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: 0 3px 10px rgba(88, 112, 164, 0.12);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition: top 180ms ease, width 180ms ease, height 180ms ease, opacity 180ms ease, transform 180ms ease, border-radius 180ms ease, background 180ms ease, box-shadow 180ms ease;
+}
+
+.task-tray-toggle::before {
+  /* Invisible adhesion zone: keep the pet and Dock hover states connected. */
+  content: "";
+  position: absolute;
+  top: -14px;
+  left: 50%;
+  width: 72px;
+  height: 16px;
+  transform: translateX(-50%);
+  background: transparent;
+  pointer-events: auto;
+}
+
+.task-tray-toggle[hidden],
+.task-tray[hidden] {
+  display: none;
+}
+
+.task-tray-toggle:hover,
+.task-tray-toggle:focus-visible {
+  color: #506a98;
+  border-color: rgba(188, 208, 238, 0.88);
+  background: rgba(242, 247, 255, 0.94);
+  box-shadow: 0 4px 12px rgba(88, 112, 164, 0.16);
+  transform: translateX(50%) translateY(-1px);
+}
+
+.task-tray-toggle--idle {
+  width: 20px;
+  height: 8px;
+  border-color: rgba(188, 208, 238, 0.28);
+  border-radius: 999px;
+  color: #7b8aa5;
+  background: rgba(255, 255, 255, 0.24);
+  box-shadow: none;
+  opacity: 0.38;
+}
+
+.task-tray-toggle--idle:hover,
+.task-tray-toggle--idle:focus-visible {
+  width: 34px;
+  height: 24px;
+  border-color: rgba(188, 208, 238, 0.88);
+  border-radius: 12px;
+  color: #506a98;
+  background: rgba(242, 247, 255, 0.94);
+  box-shadow: 0 4px 12px rgba(88, 112, 164, 0.16);
+  opacity: 1;
+}
+
+.task-tray-toggle[aria-expanded="true"] {
+  border-color: rgba(188, 208, 238, 0.76);
+  color: #4f6997;
+  background: rgba(242, 247, 255, 0.9);
+  box-shadow: 0 4px 12px rgba(88, 112, 164, 0.14);
+}
+
+.task-tray-toggle__count {
+  min-width: 1.1em;
+  color: currentColor;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 8px rgba(88, 112, 164, 0.28);
+}
+
+.task-tray-toggle--idle .task-tray-toggle__count {
+  font-size: 9px;
+  opacity: 0.92;
+  transform: scale(0.9);
+  transition: font-size 180ms ease, opacity 180ms ease, transform 180ms ease;
+}
+
+.task-tray-toggle--idle:hover .task-tray-toggle__count,
+.task-tray-toggle--idle:focus-visible .task-tray-toggle__count {
+  font-size: 12px;
+  opacity: 1;
+  transform: scale(1);
+}
+
+.task-tray-toggle--has-tasks {
+  width: 32px;
+  height: 22px;
+  border-color: rgba(112, 173, 241, 0.78);
+  color: #477fb4;
+  background: linear-gradient(135deg, rgba(237, 248, 255, 0.92), rgba(220, 239, 255, 0.68));
+  box-shadow: 0 0 0 1px rgba(112, 173, 241, 0.12), 0 4px 14px rgba(74, 142, 208, 0.24);
+}
+
+.task-tray-toggle--idle.task-tray-toggle--has-tasks {
+  width: 28px;
+  height: 20px;
+  border-radius: 8px;
+  opacity: 0.82;
+  background: rgba(232, 246, 255, 0.64);
+  box-shadow: 0 0 0 1px rgba(112, 173, 241, 0.1), 0 3px 10px rgba(74, 142, 208, 0.18);
+}
+
+.task-tray-toggle--idle.task-tray-toggle--has-tasks:hover,
+.task-tray-toggle--idle.task-tray-toggle--has-tasks:focus-visible {
+  width: 32px;
+  height: 22px;
+  opacity: 1;
+}
+
+.task-tray {
+  position: absolute;
+  right: 14px;
+  top: calc(var(--pet-dock-top, 288px) + 41px);
+  bottom: auto;
+  left: 14px;
+  z-index: 6;
+  /* The expanded native window provides real space below the arrow. Keep a
+     bounded scroll region for unusually long Agent lists. */
+  max-height: 0;
+  padding: 9px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  border: 1px solid rgba(188, 208, 238, 0.82);
+  border-radius: 17px;
+  color: #53627b;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 9px 24px rgba(88, 112, 164, 0.24);
+  -webkit-app-region: no-drag;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-10px) scale(0.97);
+  transform-origin: top center;
+  pointer-events: none;
+  transition: max-height 180ms ease, opacity 180ms ease, transform 180ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear 180ms;
+}
+
+.task-tray--open {
+  max-height: max(84px, min(320px, calc(var(--pet-window-height) - var(--pet-dock-top, 288px) - 48px)));
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+  transition: max-height 180ms ease, opacity 180ms ease, transform 180ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear 0s;
+}
+
+.task-tray--closing {
+  pointer-events: none;
+}
+
+.task-tray::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.task-tray__header,
+.task-tray__row-top,
+.task-tray__row-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+}
+
+.task-tray__header {
+  padding: 1px 2px 5px;
+  color: #596987;
+  font-size: 12px;
+}
+
+.task-tray__summary {
+  min-width: 0;
+  margin-left: auto;
+  color: #8290a7;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.task-tray__close {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: #7685a2;
+  background: transparent;
+  cursor: pointer;
+}
+
+.task-tray__close:hover,
+.task-tray__close:focus-visible {
+  color: #ffffff;
+  background: #ff7387;
+}
+
+.task-tray__row {
+  margin-top: 6px;
+  padding: 7px 8px 6px;
+  border: 1px solid rgba(188, 208, 238, 0.58);
+  border-radius: 12px;
+  background: rgba(247, 250, 255, 0.82);
+}
+
+.task-tray__row:first-child {
+  margin-top: 0;
+}
+
+.task-tray__row--waiting {
+  border-color: rgba(225, 173, 98, 0.66);
+  background: rgba(255, 249, 237, 0.88);
+}
+
+.task-tray__row--standalone .task-tray__row-top strong {
+  color: #607a9f;
+}
+
+.task-tray__agent-row--degraded {
+  border-color: rgba(224, 173, 98, 0.66);
+}
+
+.task-tray__agent-row--degraded .task-tray__row-status b {
+  color: #b17b32;
+}
+
+.task-tray__row-top strong,
+.task-tray__row-top span,
+.task-tray__row-status b,
+.task-tray__row-status span,
+.task-tray__row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-tray__row-top strong {
+  min-width: 0;
+  color: #53627b;
+  font-size: 11px;
+}
+
+.task-tray__row-top span {
+  flex: 0 0 auto;
+  color: #8492aa;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-tray__row-status {
+  justify-content: flex-start;
+  margin-top: 3px;
+  font-size: 10px;
+}
+
+.task-tray__row-status b {
+  color: #4da978;
+}
+
+.task-tray__row--waiting .task-tray__row-status b {
+  color: #b17b32;
+}
+
+.task-tray__row-status span {
+  min-width: 0;
+  color: #6d7d99;
+}
+
+.task-tray__row small {
+  display: block;
+  margin-top: 3px;
+  color: #8290a7;
+  font-size: 10px;
+}
+
+:root[data-theme="night"] .task-tray-toggle,
+:root[data-theme="night"] .task-tray {
+  color: #d1d8e6;
+  border-color: rgba(119, 132, 161, 0.48);
+  background: rgba(34, 39, 52, 0.94);
+  box-shadow: 0 8px 20px rgba(8, 10, 16, 0.34);
+}
+
+:root[data-theme="night"] .task-tray__header,
+:root[data-theme="night"] .task-tray__row-top strong {
+  color: #e9edf6;
+}
+
+:root[data-theme="night"] .task-tray__row {
+  border-color: rgba(119, 132, 161, 0.36);
+  background: rgba(50, 57, 73, 0.78);
+}
+
+:root[data-theme="night"] .task-tray__row--waiting {
+  border-color: rgba(224, 173, 98, 0.52);
+  background: rgba(71, 61, 49, 0.72);
+}
+
+:root[data-theme="night"] .task-tray__row--standalone .task-tray__row-top strong {
+  color: #afc4e4;
+}
+
+.speech-bubble {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  z-index: 4;
+  width: 192px;
+  max-width: calc(100% - 22px);
+  padding: 9px 13px 10px;
+  border: 2px solid rgba(255, 255, 255, 0.94);
+  border-radius: 19px 19px 19px 8px;
+  color: #5e5b7d;
+  background: linear-gradient(135deg, rgba(255, 249, 255, 0.96), rgba(232, 246, 255, 0.95));
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: center;
+  white-space: pre-line;
+  box-shadow: 0 7px 18px rgba(93, 112, 161, 0.2), 0 0 0 1px rgba(194, 211, 246, 0.5);
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+  transform: translate(-50%, -8px) scale(0.86) rotate(-1deg);
+  transform-origin: 50% 100%;
+  transition: opacity 180ms ease, transform 220ms cubic-bezier(0.2, 1.35, 0.4, 1), visibility 180ms ease;
+}
+
+.speech-bubble::before {
+  position: absolute;
+  top: 5px;
+  right: 10px;
+  color: #f6a8c8;
+  content: "♥";
+  font-size: 11px;
+  transform: rotate(12deg);
+}
+
+.speech-bubble--visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0) scale(1) rotate(-1deg);
+}
+
+.speech-bubble[data-kind="received"] {
+  background: linear-gradient(135deg, rgba(255, 248, 252, 0.97), rgba(255, 236, 244, 0.96));
+}
+
+.speech-bubble[data-kind="thinking"] {
+  background: linear-gradient(135deg, rgba(250, 247, 255, 0.97), rgba(235, 237, 255, 0.96));
+}
+
+.speech-bubble[data-kind="sent"],
+.speech-bubble[data-kind="online"] {
+  background: linear-gradient(135deg, rgba(247, 255, 249, 0.97), rgba(228, 250, 239, 0.96));
+}
+
+.speech-bubble[data-kind="error"] {
+  background: linear-gradient(135deg, rgba(255, 250, 246, 0.97), rgba(255, 235, 229, 0.96));
+}
+
+.speech-bubble::after {
+  position: absolute;
+  left: 28px;
+  bottom: -8px;
+  width: 13px;
+  height: 13px;
+  border-right: 2px solid rgba(255, 255, 255, 0.94);
+  border-bottom: 2px solid rgba(255, 255, 255, 0.94);
+  background: inherit;
+  content: "";
+  transform: rotate(45deg);
+}
+
+.pet-stage {
+  position: absolute;
+  inset: 0;
+  width: 280px;
+  height: 280px;
+  padding: 0;
+  border: 0;
+  border-radius: 28px;
+  outline: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition: filter 160ms ease;
+}
+
+.pet-stage:focus,
+.pet-stage:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.pet-stage--3d {
+  background: transparent;
+}
+
+.pet-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: none;
+  -webkit-app-region: no-drag;
+}
+
+.pet-stage:hover {
+  filter: saturate(1.08) brightness(1.02);
+}
+
+.pet-stage:active {
+  filter: saturate(1.08) brightness(0.98);
+}
+
+.sprite-frame {
+  position: absolute;
+  left: 50%;
+  top: 18px;
+  width: 80px;
+  height: 68px;
+  background-repeat: no-repeat;
+  background-size: 1054px 760px;
+  image-rendering: auto;
+  transform: translateX(-50%) scale(2.15);
+  transform-origin: top center;
+}
+
+.sprite-frame--active {
+  z-index: 1;
+  transition: opacity 520ms cubic-bezier(0.22, 0.75, 0.28, 1), transform 520ms cubic-bezier(0.22, 0.75, 0.28, 1);
+}
+
+.sprite-frame--transition {
+  z-index: 2;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 520ms cubic-bezier(0.22, 0.75, 0.28, 1), transform 520ms cubic-bezier(0.22, 0.75, 0.28, 1);
+}
+
+.sprite-frame[hidden] {
+  display: none;
+}
+
+.pet-stage[data-state="walk"] .sprite-frame {
+  animation: bob 540ms ease-in-out infinite;
+}
+
+.pet-stage[data-state="sleep"] .sprite-frame {
+  filter: saturate(0.78) brightness(0.98);
+}
+
+.pet-stage[data-state="angry"] .sprite-frame {
+  animation: shake 260ms ease-in-out infinite;
+}
+
+.sparkle {
+  position: absolute;
+  color: #f8bd3e;
+  font-size: 22px;
+  opacity: 0.85;
+  pointer-events: none;
+  display: none;
+}
+
+.sparkle--one {
+  top: 26px;
+  left: 42px;
+  animation: twinkle 1.8s ease-in-out infinite;
+}
+
+.sparkle--two {
+  top: 72px;
+  right: 48px;
+  color: #8bb7f0;
+  font-size: 30px;
+  animation: twinkle 1.4s 220ms ease-in-out infinite;
+}
+
+.pet-caption {
+  color: #41516c;
+  font-size: 13px;
+  font-weight: 600;
+  display: none;
+}
+
+.pet-state {
+  color: #8090aa;
+  font-weight: 500;
+}
+
+.wechat-status {
+  max-width: 210px;
+  overflow: hidden;
+  color: #8795aa;
+  font-size: 10px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: pre-line;
+  display: none;
+}
+
+.wechat-status[data-status="connected"] {
+  color: #4eae78;
+}
+
+.wechat-status[data-status="connecting"],
+.wechat-status[data-status="reconnecting"] {
+  color: #9c8bc8;
+}
+
+.wechat-status[data-status="failed"] {
+  color: #c47a98;
+}
+
+.wechat-feed {
+  width: 198px;
+  padding: 7px 10px;
+  border: 1px solid rgba(188, 208, 238, 0.78);
+  border-radius: 13px;
+  color: #53627b;
+  background: rgba(255, 255, 255, 0.58);
+  box-shadow: 0 4px 10px rgba(83, 98, 123, 0.06);
+  -webkit-app-region: no-drag;
+  display: none;
+}
+
+.wechat-feed__meta {
+  overflow: hidden;
+  color: #7890b3;
+  font-size: 10px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wechat-feed__body {
+  display: -webkit-box;
+  max-height: 28px;
+  margin-top: 3px;
+  overflow: hidden;
+  color: #53627b;
+  font-size: 11px;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.action-bar {
+  display: flex;
+  gap: 7px;
+  margin-top: 2px;
+  padding: 5px;
+  border: 1px solid rgba(188, 208, 238, 0.78);
+  border-radius: 17px;
+  background: rgba(255, 255, 255, 0.6);
+  -webkit-app-region: no-drag;
+  display: none;
+}
+
+.action-bar button,
+.close-button {
+  border: 0;
+  cursor: pointer;
+}
+
+.action-bar button {
+  width: 30px;
+  height: 25px;
+  border-radius: 11px;
+  color: #667796;
+  background: rgba(232, 240, 255, 0.86);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.action-bar button:hover {
+  color: #ffffff;
+  background: #7ca8e9;
+}
+
+.close-button {
+  position: absolute;
+  top: 7px;
+  right: 1px;
+  z-index: 2;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  color: #53627b;
+  background: rgba(255, 255, 255, 0.82);
+  font-size: 20px;
+  line-height: 22px;
+  -webkit-app-region: no-drag;
+  display: none;
+}
+
+.close-button:hover {
+  color: #ffffff;
+  background: #ff7387;
+}
+
+@keyframes bob {
+  0%,
+  100% {
+    margin-top: 0;
+  }
+
+  50% {
+    margin-top: 4px;
+  }
+}
+
+@keyframes shake {
+  0%,
+  100% {
+    margin-left: 0;
+  }
+
+  50% {
+    margin-left: 3px;
+  }
+}
+
+@keyframes twinkle {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.8) rotate(0deg);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.08) rotate(18deg);
+  }
+}
+
+
+:root[data-theme="night"] .speech-bubble,
+:root[data-theme="night"] .wechat-feed,
+:root[data-theme="night"] .action-bar,
+:root[data-theme="night"] .close-button {
+  color: #e9edf6;
+  border-color: rgba(119, 132, 161, 0.42);
+  background: rgba(34, 39, 52, 0.86);
+}
+
+.speech-bubble,
+.wechat-feed,
+.wechat-feed__meta,
+.wechat-feed__body,
+.action-bar,
+.action-bar button,
+.close-button {
+  transition: background 520ms cubic-bezier(0.2, 0.85, 0.3, 1),
+    border-color 460ms ease,
+    box-shadow 520ms cubic-bezier(0.2, 0.85, 0.3, 1),
+    color 420ms ease;
+}
+
+:root[data-theme="night"] .wechat-feed__body,
+:root[data-theme="night"] .wechat-feed__meta,
+:root[data-theme="night"] .wechat-status {
+  color: #b7c0d4;
+}
