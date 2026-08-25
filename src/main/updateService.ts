@@ -79,8 +79,14 @@ function manifestResult(currentVersion: string, manifest: UnknownRecord): Update
   };
 }
 
+const DEFAULT_UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/501hahaha/PenguinDesktopPet/main/update-manifest.json";
+
 function manifestUrls(): string[] {
-  return [process.env.PENGUIN_UPDATE_MANIFEST_URL, process.env.PENGUIN_UPDATE_MIRROR_MANIFEST_URL]
+  return [
+    process.env.PENGUIN_UPDATE_MANIFEST_URL,
+    process.env.PENGUIN_UPDATE_MIRROR_MANIFEST_URL,
+    DEFAULT_UPDATE_MANIFEST_URL,
+  ]
     .filter((value): value is string => typeof value === "string" && Boolean(value.trim()))
     .map((value) => safeHttpsUrl(value))
     .filter((value): value is string => Boolean(value))

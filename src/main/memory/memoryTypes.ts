@@ -1,18 +1,23 @@
 import type { AgentProvider } from "../../settings/types";
 import type { AgentConfig } from "../../agents/types";
-import type { MemoryEntryKind, MemoryScope } from "../agents/orchestrationTypes";
+import type { MemoryEntryKind, MemoryEntryType, MemoryReviewState, MemoryScope } from "../agents/orchestrationTypes";
 
 export type MemoryDecisionAction = "IGNORE" | "ADD" | "UPDATE" | "DELETE";
 
 export interface MemoryDecision {
   action: MemoryDecisionAction;
   kind?: MemoryEntryKind;
+  type?: MemoryEntryType;
   scope?: MemoryScope;
   content?: string;
+  summary?: string;
   target?: string;
   targetId?: string;
   importance?: number;
   confidence?: number;
+  rankScore?: number;
+  reviewState?: MemoryReviewState;
+  createdAt?: string;
   workspaceId?: string;
   taskId?: string;
   reason?: string;
@@ -58,5 +63,7 @@ export interface MemoryRetrieveInput {
   workspaceId?: string;
   projectScope?: string;
   agentScope?: string;
+  /** Absolute workspace path used only to load bounded AGENTS/PROJECT_MEMORY sections. */
+  workspacePath?: string;
   limit?: number;
 }

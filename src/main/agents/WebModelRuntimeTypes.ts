@@ -27,5 +27,11 @@ export interface WebModelRuntimeState {
   providers: WebModelProvider[];
   models: WebModelModel[];
   selectedModelId: string | null;
+  startedAt: number | null;
+  logs: Array<{
+    timestamp: number;
+    level: "info" | "warn" | "error";
+    message: string;
+  }>;
   updatedAt: number;
 }

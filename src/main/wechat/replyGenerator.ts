@@ -14,8 +14,8 @@ import type { WeChatConfig } from "./config";
 import type { AgentStatus } from "./events";
 import { CodexAppServerClient, type CodexProgressListener } from "./codexAppServer";
 import { readCcSwitchRuntimeConfig, type CcSwitchRuntimeConfig } from "../ccSwitch";
+import { agentManager } from "../agents/AgentManager";
 import { resolveModelProvider } from "../agents/ModelProviderResolver";
-import { generateZeroTokenReply } from "../agents/ZeroTokenProvider";
 
 function commonReplyInstructions(channelName: string, petName = DEFAULT_PET_NAME, userName = DEFAULT_USER_NAME): string {
   const resolvedPetName = normalizeCallName(petName, DEFAULT_PET_NAME);
@@ -177,10 +177,11 @@ export async function generateReply(
   userName = DEFAULT_USER_NAME,
   zeroToken: ZeroTokenSettings = defaultZeroTokenSettings(),
 ): Promise<string> {
-  const modelProvider = resolveModelProvider(agentConfig, zeroToken, agentPermissionPolicy);
-  if (modelProvider.kind === "zero-token") {
+  const modelProviderResolution = resolveModelProvider(agentConfig, zeroToken, agentPermissionPolicy);
+  const modelProvider = agentManager.resolveModelProvider(agentConfig, zeroToken, agentPermissionPolicy);
+  if (modelProvider) {
     const prompt = buildReplyPrompt(incomingText, conversationContext, "custom", "chat-only", channelName, petName, userName);
-    return generateZeroTokenReply(zeroToken, [{ role: "user", content: prompt }], onProgress);
+    return modelProvider.chatCompletion({ messages: [{ role: "user", content: prompt }], onProgress });
   }
   // Full-permission mode is always a local Agent execution. CCS is metadata
   // for model selection and must never silently replace the Agent with its
@@ -202,7 +203,7 @@ export async function generateReply(
     );
   }
 
-  if (agentConfig?.ccSwitchCurrentConfig) {
+  if (modelProviderResolution.kind === "cc-switch" && agentConfig?.ccSwitchCurrentConfig) {
     const runtime = readCcSwitchRuntimeConfig(agentConfig.ccSwitchCurrentConfig.app);
     if (!runtime) {
       throw new Error('CC Switch current API configuration is unavailable; re-import the current CCS configuration');

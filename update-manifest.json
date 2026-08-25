@@ -1,0 +1,32 @@
+{
+  "product": "penguin-desktop-pet",
+  "latestVersion": "1.0.9",
+  "publishedAt": "2026-08-25T15:08:52.725Z",
+  "releaseNotes": [
+    "Windows 安装改为当前用户模式，无需管理员权限。",
+    "修复退出时残留进程导致升级文件被占用的问题。",
+    "正式包隔离本机开发环境的 Bot 凭据与聊天记录。",
+    "托盘和安装程序使用默认 IDLE 动画截帧图标。",
+    "设置中心统一紧凑卡片与 IconBadge SVG 图标，主页仅保留导航入口。",
+    "长期记忆升级为自动提炼、评分、保存和检索，并提供独立的记忆管理页面。"
+  ],
+  "releasePageUrl": "https://github.com/501hahaha/PenguinDesktopPet/releases/tag/v1.0.9",
+  "assets": [
+    {
+      "kind": "nsis",
+      "platform": "win32",
+      "arch": "x64",
+      "sizeBytes": 120554998,
+      "sha256": "a8db45ccc91a54579153005340a25141901a7c12f8a1c875f57b65a3b0c9120d",
+      "downloadUrl": "https://github.com/501hahaha/PenguinDesktopPet/releases/download/v1.0.9/PenguinDesktopPet-1.0.9-win-x64-setup.exe"
+    },
+    {
+      "kind": "portable",
+      "platform": "win32",
+      "arch": "x64",
+      "sizeBytes": 120381243,
+      "sha256": "2b78cbe4bf31f3b17d0d64464cafa2a2192089451a4186166a672f91d64530ce",
+      "downloadUrl": "https://github.com/501hahaha/PenguinDesktopPet/releases/download/v1.0.9/PenguinDesktopPet-1.0.9-win-x64-portable.exe"
+    }
+  ]
+}

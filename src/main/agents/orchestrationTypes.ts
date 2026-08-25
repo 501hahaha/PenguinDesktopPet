@@ -192,15 +192,28 @@ export type MemoryScope =
   | `project:${string}`
   | `agent:${string}`
   | `project:${string}:agent:${string}`;
+/** Stable long-term memory taxonomy. `kind` remains for compatibility with the first memory schema. */
+export type MemoryEntryType =
+  | "user_profile"
+  | "preference"
+  | "project"
+  | "decision"
+  | "skill"
+  | "behavior"
+  | "knowledge"
+  | "temporary";
 export type MemoryEntryKind = "preference" | "fact" | "rule" | "experience" | "project_fact" | "decision" | "agent_rule" | "workflow";
 export type MemoryEntryOperation = "add" | "replace" | "remove";
 export type MemoryEntryStatus = "pending" | "approved" | "rejected" | "archived";
-export type MemoryEntrySource = "explicit-user" | "learning-candidate" | "approved-learning" | "agent" | "system";
+export type MemoryReviewState = "none" | "review";
+export type MemoryEntrySource = "explicit-user" | "learning-candidate" | "approved-learning" | "auto-extractor" | "agent" | "system";
 
 export interface MemoryEntry {
   id: string;
   scope: MemoryScope;
   kind: MemoryEntryKind;
+  /** New taxonomy used by the automatic memory pipeline. */
+  type?: MemoryEntryType;
   operation: MemoryEntryOperation;
   targetId?: string;
   content: string;
@@ -208,9 +221,16 @@ export interface MemoryEntry {
   status: MemoryEntryStatus;
   workspaceId?: string;
   taskId?: string;
+  summary?: string;
+  /** JSON encoded local lexical embedding; no external embedding service is used. */
+  embedding?: string;
   importance?: number;
   confidence?: number;
+  /** 0-100 MemoryRanker score. */
+  rankScore?: number;
+  reviewState?: MemoryReviewState;
   lastAccessedAt?: string;
+  lastUsedAt?: string;
   accessCount?: number;
   createdAt: string;
   updatedAt: string;

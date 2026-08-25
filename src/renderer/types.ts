@@ -14,7 +14,8 @@ import type { DesktopCaptureDisplay } from "../main/media/DesktopCaptureService"
 import type { AgentWindowFollowStatus } from "../main/media/AgentWindowTracker";
 import type { AgentEvent } from "../main/events/EventTypes";
 import type { ZeroTokenProviderStatus } from "../main/agents/ZeroTokenProvider";
-import type { WebModelProvider, WebModelModel, WebModelRuntimeState } from "../main/agents/WebModelRuntimeTypes";
+import type { WebModelProvider, WebModelModel } from "../main/agents/WebModelRuntimeTypes";
+import type { RuntimeLogEntry, RuntimeProvider } from "../main/runtime/types";
 
 export type { AgentWindowFollowStatus } from "../main/media/AgentWindowTracker";
 
@@ -67,11 +68,22 @@ export interface PenguinPetApi {
   zeroToken: {
     check: (config: ZeroTokenSettings) => Promise<ZeroTokenProviderStatus>;
     runtime: () => Promise<ZeroTokenProviderStatus>;
+    status: (providerId?: string) => Promise<ZeroTokenProviderStatus>;
+    start: (config: ZeroTokenSettings) => Promise<ZeroTokenProviderStatus>;
+    stop: () => Promise<ZeroTokenProviderStatus>;
+    restart: (config: ZeroTokenSettings) => Promise<ZeroTokenProviderStatus>;
+    healthCheck: (config: ZeroTokenSettings) => Promise<RuntimeProvider>;
+    checkLogin: (config: ZeroTokenSettings) => Promise<RuntimeProvider>;
+    login: (config: ZeroTokenSettings, providerId?: string) => Promise<ZeroTokenProviderStatus>;
+    logout: (config: ZeroTokenSettings, providerId?: string) => Promise<ZeroTokenProviderStatus>;
+    logs: () => Promise<RuntimeLogEntry[]>;
+    refreshModels: (config: ZeroTokenSettings) => Promise<ZeroTokenProviderStatus>;
     providers: (config: ZeroTokenSettings) => Promise<WebModelProvider[]>;
     models: (config: ZeroTokenSettings) => Promise<WebModelModel[]>;
-    loginProvider: (config: ZeroTokenSettings, providerId: string) => Promise<WebModelRuntimeState>;
-    logoutProvider: (config: ZeroTokenSettings, providerId: string) => Promise<WebModelRuntimeState>;
+    loginProvider: (config: ZeroTokenSettings, providerId: string) => Promise<ZeroTokenProviderStatus>;
+    logoutProvider: (config: ZeroTokenSettings, providerId: string) => Promise<ZeroTokenProviderStatus>;
     openDashboard: (config: ZeroTokenSettings) => Promise<{ ok: boolean; detail: string }>;
+    openLoginWindow: (config: ZeroTokenSettings, providerId?: string) => Promise<ZeroTokenProviderStatus>;
     subscribe: (listener: (status: ZeroTokenProviderStatus) => void) => () => void;
   };
   updates: {

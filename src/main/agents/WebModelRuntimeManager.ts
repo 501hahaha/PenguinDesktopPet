@@ -1,7 +1,8 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { createServer } from "node:net";
+import { promisify } from "node:util";
 import type { ZeroTokenSettings } from "../../settings/types";
 import { terminateOwnedChildProcess } from "../processCleanup";
 import {
@@ -10,12 +11,13 @@ import {
   type WebModelRuntimeState,
   type WebModelRuntimeStatus,
 } from "./WebModelRuntimeTypes";
+import type { RuntimeLogEntry, RuntimeProvider } from "../runtime/types";
 
 export const WEBMODEL_DEFAULT_PORT = 3456;
-export const WEBMODEL_GITHUB_URL = "https://github.com/linuxhsj/WebModel.git";
 
 export type ZeroTokenErrorCode =
   | "ZERO_TOKEN_SERVICE_UNAVAILABLE"
+  | "ZERO_TOKEN_RUNTIME_NOT_FOUND"
   | "ZERO_TOKEN_START_FAILED"
   | "ZERO_TOKEN_PORT_CONFLICT"
   | "ZERO_TOKEN_BROWSER_NOT_FOUND"
@@ -49,9 +51,24 @@ interface JsonResult {
   value: unknown;
 }
 
-interface RuntimePaths {
-  cliPath: string;
+type RuntimeKind = "exe" | "node" | "python";
+
+interface RuntimeLaunchSpec {
+  runtimePath: string;
+  kind: RuntimeKind;
+  command: string;
+  args: string[];
+  cwd: string;
   stateDir: string;
+}
+
+interface ModelsProbe {
+  reachable: boolean;
+  accepted: boolean;
+  requiresLogin: boolean;
+  statusCode: number | null;
+  models: WebModelModel[];
+  detail: string;
 }
 
 const MAX_LOG_LENGTH = 2_000;
@@ -59,6 +76,7 @@ const HEALTH_POLL_LIMIT = 60;
 const HEALTH_CHECK_INTERVAL_MS = 1_000;
 const STARTUP_HEALTH_TIMEOUT_MS = 1_500;
 const NORMAL_HEALTH_INTERVAL_MS = 10_000;
+const execFileAsync = promisify(execFile);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -77,6 +95,95 @@ function redactLog(value: string): string {
     .replace(/(authorization|x-api-key|api[-_ ]?key|token|secret|password)\s*[:=]\s*[^\s,;]+/gi, "$1=<redacted>")
     .replace(/https?:\/\/[^\s]+/gi, (url) => url.replace(/([?&](?:token|key|secret|password)=)[^&]+/gi, "$1<redacted>"))
     .slice(-MAX_LOG_LENGTH);
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function isFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function runtimeKind(path: string): RuntimeKind | null {
+  switch (extname(path).toLowerCase()) {
+    case ".exe": return "exe";
+    case ".js": return "node";
+    case ".py": return "python";
+    default: return null;
+  }
+}
+
+function runtimePathCandidates(path: string): string[] {
+  if (!isDirectory(path)) return [path];
+  const known = [
+    join(path, "ZeroTokenRuntime.exe"),
+    join(path, "zerotoken.exe"),
+    join(path, "WebModel.exe"),
+    join(path, "webmodel.exe"),
+    join(path, "main.exe"),
+    join(path, "dist", "cli.js"),
+    join(path, "cli.js"),
+    join(path, "runtime.js"),
+    join(path, "server.js"),
+    join(path, "index.js"),
+    join(path, "main.py"),
+    join(path, "webmodel.py"),
+    join(path, "zerotoken.py"),
+    join(path, "runtime.py"),
+    join(path, "server.py"),
+    join(path, "index.py"),
+  ];
+  try {
+    const directFiles = readdirSync(path, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && Boolean(runtimeKind(entry.name)))
+      .map((entry) => join(path, entry.name))
+      .sort((left, right) => left.localeCompare(right));
+    return [...known, ...directFiles];
+  } catch {
+    return known;
+  }
+}
+
+function safeEnvironmentSummary(env: NodeJS.ProcessEnv): string {
+  const summary: Record<string, string> = {
+    NODE_ENV: env.NODE_ENV || "<unset>",
+    PENGUIN_NODE_PATH: env.PENGUIN_NODE_PATH || "<unset>",
+    PENGUIN_PYTHON_PATH: env.PENGUIN_PYTHON_PATH || "<unset>",
+    PENGUIN_WEBMODEL_SOURCE: env.PENGUIN_WEBMODEL_SOURCE || "<unset>",
+    PATH: env.PATH ? "<set>" : "<unset>",
+  };
+  const keys = Object.keys(env).sort();
+  return JSON.stringify({ keyCount: keys.length, keys: keys.slice(0, 32), values: summary });
+}
+
+function formatRuntimeDebug(spec: RuntimeLaunchSpec, env: NodeJS.ProcessEnv): string {
+  return [
+    "[ZeroToken Debug]",
+    `platform: ${process.platform}`,
+    `runtime executable path: ${spec.runtimePath}`,
+    `command: ${spec.command}`,
+    `args: ${JSON.stringify(spec.args)}`,
+    `cwd: ${spec.cwd}`,
+    `env: ${safeEnvironmentSummary(env)}`,
+    "shell: false",
+  ].join("\n");
+}
+
+function sanitizedEnvironment(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === "string") env[key] = value;
+  }
+  return env;
 }
 
 function errorMessage(error: unknown): string {
@@ -105,10 +212,6 @@ function parseConfiguredUrl(config: ZeroTokenSettings): { origin: string; baseUr
   const origin = url.origin;
   const baseUrl = `${origin}${url.pathname.replace(/\/+$/, "").replace(/\/v1$/, "")}/v1`;
   return { origin, baseUrl, port };
-}
-
-function healthUrl(origin: string): string {
-  return `${origin}/webmodel/health`;
 }
 
 function providersUrl(origin: string): string {
@@ -153,8 +256,8 @@ function responseDetail(result: JsonResult, fallback: string): string {
 function initialState(): WebModelRuntimeState {
   return {
     status: "stopped",
-    port: null,
-    baseUrl: "",
+    port: WEBMODEL_DEFAULT_PORT,
+    baseUrl: `http://127.0.0.1:${WEBMODEL_DEFAULT_PORT}/v1`,
     pid: null,
     spawnedByApp: false,
     lastError: null,
@@ -162,6 +265,8 @@ function initialState(): WebModelRuntimeState {
     providers: [],
     models: [],
     selectedModelId: null,
+    startedAt: null,
+    logs: [],
     updatedAt: Date.now(),
   };
 }
@@ -174,20 +279,47 @@ export class WebModelRuntimeManager {
   private lastHealthCheckAt = 0;
   private recoveryAttempted = false;
   private stopping = false;
-  private readonly transientChildren = new Set<ChildProcess>();
 
   constructor(options: WebModelRuntimeManagerOptions) {
     this.options = options;
   }
 
   getState(): WebModelRuntimeState {
-    return { ...this.state, providers: [...this.state.providers], models: [...this.state.models] };
+    return { ...this.state, providers: [...this.state.providers], models: [...this.state.models], logs: [...this.state.logs] };
+  }
+
+  getLogs(): RuntimeLogEntry[] {
+    return this.state.logs.map((entry) => ({ ...entry }));
+  }
+
+  getRuntimeProvider(): RuntimeProvider {
+    const state = this.state;
+    return {
+      id: "zerotoken",
+      type: "zerotoken",
+      name: "ZeroToken Runtime",
+      status: state.status,
+      baseURL: state.baseUrl,
+      port: state.port ?? 0,
+      models: state.models.map((model) => model.id),
+      ...(state.pid ? { pid: state.pid } : {}),
+      ...(state.lastError ? { error: state.lastError } : {}),
+      updatedAt: state.updatedAt,
+    };
   }
 
   private setState(patch: Partial<WebModelRuntimeState>): WebModelRuntimeState {
     this.state = { ...this.state, ...patch, updatedAt: Date.now() };
     this.options.onStateChanged?.(this.getState());
     return this.getState();
+  }
+
+  private appendLog(level: RuntimeLogEntry["level"], message: string): void {
+    const normalized = redactLog(message).trim();
+    if (!normalized) return;
+    const entry: RuntimeLogEntry = { timestamp: Date.now(), level, message: normalized.slice(0, MAX_LOG_LENGTH) };
+    this.state = { ...this.state, logs: [...this.state.logs, entry].slice(-80), updatedAt: Date.now() };
+    this.options.onStateChanged?.(this.getState());
   }
 
   private setFailure(error: unknown, fallbackCode: ZeroTokenErrorCode): ZeroTokenRuntimeError {
@@ -199,23 +331,67 @@ export class WebModelRuntimeManager {
       lastError: runtimeError.message,
       detail: runtimeError.message,
     });
+    this.appendLog("error", runtimeError.message);
     return runtimeError;
   }
 
   private async requestHealth(origin: string, timeoutMs = 2_000): Promise<boolean> {
+    const baseUrl = `${origin}/v1`;
+    const probe = await this.probeModels(baseUrl, timeoutMs);
+    this.lastHealthCheckAt = Date.now();
+    // Any HTTP response means a service already owns the configured port; the
+    // caller can classify 401/403/5xx as login-required or error instead of
+    // spawning a second runtime beside it.
+    return probe.reachable;
+  }
+
+  private async probeModels(baseUrl: string, timeoutMs = 2_000): Promise<ModelsProbe> {
     try {
-      const result = await fetchJson(healthUrl(origin), timeoutMs);
-      this.lastHealthCheckAt = Date.now();
-      return result.response.ok && isRecord(result.value) && result.value.status === "healthy";
-    } catch {
-      this.lastHealthCheckAt = Date.now();
-      return false;
+      const result = await fetchJson(modelsUrl(baseUrl), timeoutMs);
+      const statusCode = result.response.status;
+      if (statusCode === 401 || statusCode === 403) {
+        return {
+          reachable: true,
+          accepted: true,
+          requiresLogin: true,
+          statusCode,
+          models: [],
+          detail: responseDetail(result, "ZeroToken Runtime 需要浏览器登录"),
+        };
+      }
+      if (!result.response.ok) {
+        return {
+          reachable: true,
+          accepted: false,
+          requiresLogin: false,
+          statusCode,
+          models: [],
+          detail: responseDetail(result, `ZeroToken Runtime 返回 HTTP ${statusCode}`),
+        };
+      }
+      return {
+        reachable: true,
+        accepted: true,
+        requiresLogin: false,
+        statusCode,
+        models: this.parseModels(result.value),
+        detail: "ZeroToken Runtime /v1/models 可用",
+      };
+    } catch (error) {
+      return {
+        reachable: false,
+        accepted: false,
+        requiresLogin: false,
+        statusCode: null,
+        models: [],
+        detail: errorMessage(error),
+      };
     }
   }
 
   async healthCheck(config?: ZeroTokenSettings): Promise<boolean> {
     const parsed = config ? parseConfiguredUrl(config) : this.state.baseUrl
-      ? parseConfiguredUrl({ enabled: true, baseUrl: this.state.baseUrl, model: "", timeout: 120_000, autoStart: true })
+      ? parseConfiguredUrl({ enabled: true, provider: "chatgpt-web", baseUrl: this.state.baseUrl, runtimePath: "", model: "", timeout: 120_000, autoStart: true })
       : null;
     if (!parsed) return false;
     return this.requestHealth(parsed.origin, Math.min(config?.timeout ?? 5_000, 5_000));
@@ -223,36 +399,50 @@ export class WebModelRuntimeManager {
 
   async detect(config: ZeroTokenSettings): Promise<WebModelRuntimeState> {
     const parsed = parseConfiguredUrl(config);
-    const healthy = await this.requestHealth(parsed.origin);
-    if (!healthy) {
+    const probe = await this.probeModels(parsed.baseUrl, Math.min(config.timeout || 5_000, 5_000));
+    if (!probe.accepted) {
       if (!this.child) {
+        if (!probe.reachable) {
+          try {
+            await this.resolveRuntimePaths(config, parsed.port);
+          } catch (error) {
+            if (error instanceof ZeroTokenRuntimeError && error.code === "ZERO_TOKEN_RUNTIME_NOT_FOUND") {
+              this.setFailure(error, "ZERO_TOKEN_RUNTIME_NOT_FOUND");
+              return this.getState();
+            }
+          }
+        }
         return this.setState({
-          status: "stopped",
-          port: null,
+          status: probe.reachable ? "error" : "stopped",
+          port: probe.reachable ? parsed.port : null,
           baseUrl: parsed.baseUrl,
           pid: null,
           spawnedByApp: false,
           providers: [],
           models: [],
           selectedModelId: null,
-          lastError: null,
-          detail: "WebModel 未检测到",
+          lastError: probe.reachable ? `ZERO_TOKEN_SERVICE_UNAVAILABLE: ${probe.detail}` : null,
+          detail: probe.reachable ? probe.detail : "ZeroToken Runtime 未检测到",
         });
       }
-      return this.getState();
+      return this.setState({
+        status: "error",
+        lastError: `ZERO_TOKEN_SERVICE_UNAVAILABLE: ${probe.detail}`,
+        detail: probe.detail,
+      });
     }
 
     const catalog = await this.refreshCatalog(parsed.origin, parsed.baseUrl, config.model);
     return this.setState({
-      status: catalog.status,
+      status: probe.requiresLogin ? "login_required" : catalog.status,
       port: parsed.port,
       baseUrl: parsed.baseUrl,
       pid: this.child?.pid ?? null,
       spawnedByApp: Boolean(this.child),
       lastError: null,
-      detail: catalog.detail,
+      detail: probe.requiresLogin ? "ZeroToken Runtime 需要浏览器登录" : catalog.detail,
       providers: catalog.providers,
-      models: catalog.models,
+      models: probe.models.length > 0 ? probe.models : catalog.models,
       selectedModelId: catalog.selectedModelId,
     });
   }
@@ -368,36 +558,71 @@ export class WebModelRuntimeManager {
       providers: [],
       models: [],
       selectedModelId: null,
+      startedAt: Date.now(),
     });
+    this.appendLog("info", `启动 ZeroToken Runtime · 端口 ${port}`);
+    this.appendLog("info", [
+      "[ZeroToken Debug]",
+      `platform: ${process.platform}`,
+      `runtime executable path: ${config.runtimePath.trim() || process.env.PENGUIN_WEBMODEL_SOURCE?.trim() || "<unconfigured>"}`,
+      "command: <not resolved>",
+      "args: []",
+      "cwd: <not resolved>",
+      `env: ${safeEnvironmentSummary(sanitizedEnvironment())}`,
+      "shell: false",
+    ].join("\n"));
 
-    let paths: RuntimePaths;
+    let launchSpec: RuntimeLaunchSpec;
     try {
-      paths = await this.resolveRuntimePaths();
+      launchSpec = await this.resolveRuntimePaths(config, port);
     } catch (error) {
       throw this.setFailure(error, "ZERO_TOKEN_START_FAILED");
     }
     if (this.stopping) return this.getState();
 
-    const child = this.spawnWebModel(paths.cliPath, paths.stateDir, port);
+    let child: ChildProcess;
+    try {
+      child = this.spawnWebModel(launchSpec);
+    } catch (error) {
+      throw this.setFailure(error, error instanceof ZeroTokenRuntimeError ? error.code : "ZERO_TOKEN_START_FAILED");
+    }
     this.child = child;
     this.setState({ pid: child.pid ?? null, spawnedByApp: true });
     let childOutput = "";
+    let spawnError: ZeroTokenRuntimeError | null = null;
     const onChildOutput = (chunk: Buffer | string) => {
       childOutput = `${childOutput}${String(chunk)}`.slice(-MAX_LOG_LENGTH);
       const line = redactLog(String(chunk)).trim();
-      if (line) console.info(`[ZeroToken] ${line}`);
+      if (line) {
+        console.info(`[ZeroToken] ${line}`);
+        this.appendLog("info", line);
+      }
     };
     child.stdout?.on("data", onChildOutput);
     child.stderr?.on("data", (chunk) => {
       childOutput = `${childOutput}${String(chunk)}`.slice(-MAX_LOG_LENGTH);
       const line = redactLog(String(chunk)).trim();
-      if (line) console.warn(`[ZeroToken] ${line}`);
+      if (line) {
+        console.warn(`[ZeroToken] ${line}`);
+        this.appendLog("warn", line);
+      }
     });
     child.once("error", (error) => {
-      console.error(`[ZeroToken] spawn error: ${redactLog(errorMessage(error))}`);
+      const detail = `Runtime 进程启动失败：${errorMessage(error)}。请检查 command、args、cwd 和运行时依赖。`;
+      spawnError = new ZeroTokenRuntimeError("ZERO_TOKEN_START_FAILED", detail);
+      const debug = formatRuntimeDebug(launchSpec, sanitizedEnvironment());
+      console.error(`${debug}\nspawn error: ${redactLog(errorMessage(error))}`);
+      this.appendLog("error", `${debug}\nspawn error: ${redactLog(errorMessage(error))}\n${detail}`);
+      this.setState({
+        status: "error",
+        pid: null,
+        spawnedByApp: false,
+        lastError: spawnError.message,
+        detail: spawnError.message,
+      });
     });
     child.once("exit", (code, signal) => {
-      if (this.child !== child || this.stopping) return;
+      if (spawnError || this.child !== child || this.stopping) return;
       this.child = null;
       this.recoveryAttempted = true;
       const browserUnavailable = /(?:chrome|chromium|browser).*(?:not found|unavailable|missing)|executable.*does not exist/i.test(childOutput);
@@ -409,10 +634,15 @@ export class WebModelRuntimeManager {
         lastError: `${failureCode}: WebModel exited (${code ?? "signal " + signal})`,
         detail: `${failureCode}: WebModel 子进程已退出`,
       });
+      this.appendLog("error", `${failureCode}: WebModel 子进程已退出`);
     });
 
     for (let attempt = 0; attempt < HEALTH_POLL_LIMIT; attempt += 1) {
       if (this.child !== child) break;
+      if (spawnError) {
+        this.stopSpawnedChild(child);
+        throw spawnError;
+      }
       if (await this.requestHealth(new URL(baseUrl).origin, STARTUP_HEALTH_TIMEOUT_MS)) {
         try {
           const catalog = await this.refreshCatalog(new URL(baseUrl).origin, baseUrl, config.model);
@@ -437,6 +667,10 @@ export class WebModelRuntimeManager {
       }
       await new Promise((resolveDelay) => setTimeout(resolveDelay, attempt < 2 ? 500 : HEALTH_CHECK_INTERVAL_MS));
     }
+    if (spawnError) {
+      this.stopSpawnedChild(child);
+      throw spawnError;
+    }
     const detail = this.state.lastError || "WebModel 启动后未通过 /webmodel/health 检查";
     const code: ZeroTokenErrorCode = /(?:chrome|chromium|browser).*(?:not found|unavailable|missing)|executable.*does not exist/i.test(childOutput)
       ? "ZERO_TOKEN_BROWSER_NOT_FOUND"
@@ -458,10 +692,8 @@ export class WebModelRuntimeManager {
     const child = this.child;
     this.child = null;
     const startPromise = this.startPromise;
-    const transientChildren = [...this.transientChildren];
     await Promise.all([
       ...(child ? [terminateOwnedChildProcess(child, "WebModel Runtime")] : []),
-      ...transientChildren.map((item) => terminateOwnedChildProcess(item, "WebModel bootstrap")),
     ]);
     await startPromise?.catch(() => undefined);
     this.setState({
@@ -473,7 +705,9 @@ export class WebModelRuntimeManager {
       selectedModelId: null,
       lastError: null,
       detail: "WebModel 已停止",
+      startedAt: null,
     });
+    this.appendLog("info", "ZeroToken Runtime 已停止");
   }
 
   async restart(config: ZeroTokenSettings): Promise<WebModelRuntimeState> {
@@ -587,80 +821,117 @@ export class WebModelRuntimeManager {
     throw new ZeroTokenRuntimeError("ZERO_TOKEN_PORT_CONFLICT", "No free localhost port was found");
   }
 
-  private spawnWebModel(cliPath: string, stateDir: string, port: number): ChildProcess {
-    mkdirSync(stateDir, { recursive: true });
-    const nodePath = process.env.PENGUIN_NODE_PATH?.trim() || (process.platform === "win32" ? "node.exe" : "node");
-    const args = [cliPath, "--port", String(port), "--host", "127.0.0.1", "--no-open", "--browser-mode", "launch", "--state-dir", stateDir];
-    const child = spawn(nodePath, args, {
-      cwd: dirname(cliPath),
-      env: { ...process.env },
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    return child;
-  }
+  private spawnWebModel(spec: RuntimeLaunchSpec): ChildProcess {
+    mkdirSync(spec.stateDir, { recursive: true });
+    const env = sanitizedEnvironment();
+    const debug = formatRuntimeDebug(spec, env);
+    console.info(debug);
+    this.appendLog("info", debug);
 
-  private async resolveRuntimePaths(): Promise<RuntimePaths> {
-    const configured = process.env.PENGUIN_WEBMODEL_SOURCE?.trim();
-    const candidates = [
-      configured,
-      this.options.getResourcesPath ? join(this.options.getResourcesPath(), "webmodel", "dist", "cli.js") : undefined,
-      this.options.getAppPath ? join(this.options.getAppPath(), "resources", "webmodel", "dist", "cli.js") : undefined,
-      join(this.options.getUserDataPath(), "webmodel-sidecar", "source", "dist", "cli.js"),
-    ].filter((value): value is string => Boolean(value));
-    const existing = candidates.map((candidate) => {
-      if (candidate.endsWith(".js")) return candidate;
-      return join(candidate, "dist", "cli.js");
-    }).find((candidate) => existsSync(candidate));
-    if (existing) return { cliPath: resolve(existing), stateDir: join(this.options.getUserDataPath(), "webmodel-state") };
-
-    const sidecarRoot = join(this.options.getUserDataPath(), "webmodel-sidecar");
-    const sourceDir = join(sidecarRoot, "source");
-    mkdirSync(sidecarRoot, { recursive: true });
-    if (!existsSync(join(sourceDir, ".git"))) {
-      await this.runCommand(process.platform === "win32" ? "git.exe" : "git", ["clone", "--depth", "1", WEBMODEL_GITHUB_URL, sourceDir], dirname(sourceDir), 180_000);
+    const invalid = [
+      !isFile(spec.runtimePath) ? `Runtime 文件不存在：${spec.runtimePath}` : "",
+      !isDirectory(spec.cwd) ? `cwd 不存在或不是目录：${spec.cwd}` : "",
+      spec.args.some((arg) => typeof arg !== "string" || arg.trim() === "") ? "args 包含空值或非字符串" : "",
+      !spec.command.trim() ? "command 为空" : "",
+    ].filter(Boolean);
+    if (invalid.length) {
+      const code: ZeroTokenErrorCode = invalid.some((item) => item.startsWith("Runtime 文件不存在"))
+        ? "ZERO_TOKEN_RUNTIME_NOT_FOUND"
+        : "ZERO_TOKEN_START_FAILED";
+      throw new ZeroTokenRuntimeError(code, invalid.join("；"));
     }
-    await this.runCommand(process.platform === "win32" ? "npm.cmd" : "npm", ["install", "--no-audit", "--no-fund"], sourceDir, 300_000);
-    await this.runCommand(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "build"], sourceDir, 180_000);
-    const cliPath = join(sourceDir, "dist", "cli.js");
-    if (!existsSync(cliPath)) throw new ZeroTokenRuntimeError("ZERO_TOKEN_START_FAILED", "WebModel build did not produce dist/cli.js");
-    return { cliPath, stateDir: join(this.options.getUserDataPath(), "webmodel-state") };
+
+    try {
+      return spawn(spec.command, spec.args, {
+        cwd: spec.cwd,
+        env,
+        windowsHide: true,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (error) {
+      const detail = `Runtime 启动失败：${errorMessage(error)}。Windows spawn 参数已记录，请检查 executable、args、cwd 和 shell。`;
+      this.appendLog("error", `${debug}\nspawn exception: ${redactLog(errorMessage(error))}\n${detail}`);
+      throw new ZeroTokenRuntimeError("ZERO_TOKEN_START_FAILED", detail);
+    }
   }
 
-  private runCommand(command: string, args: string[], cwd: string, timeoutMs: number): Promise<void> {
-    return new Promise<void>((resolveCommand, rejectCommand) => {
-      let settled = false;
-      let output = "";
-      const child = spawn(command, args, { cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-      this.transientChildren.add(child);
-      const cleanup = () => this.transientChildren.delete(child);
-      const append = (chunk: Buffer | string) => { output = `${output}${String(chunk)}`.slice(-MAX_LOG_LENGTH); };
-      child.stdout?.on("data", append);
-      child.stderr?.on("data", append);
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        void terminateOwnedChildProcess(child, `WebModel bootstrap (${command})`).finally(() => {
-          cleanup();
-          rejectCommand(new ZeroTokenRuntimeError("ZERO_TOKEN_START_FAILED", `${command} timed out`));
-        });
-      }, timeoutMs);
-      child.once("error", (error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        cleanup();
-        rejectCommand(new ZeroTokenRuntimeError("ZERO_TOKEN_START_FAILED", `${command}: ${errorMessage(error)}`));
-      });
-      child.once("exit", (code) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        cleanup();
-        if (code === 0) resolveCommand();
-        else rejectCommand(new ZeroTokenRuntimeError("ZERO_TOKEN_START_FAILED", `${command} exited ${code}: ${redactLog(output)}`));
-      });
-    });
+  private async resolveRuntimeCommand(command: string, kind: RuntimeKind): Promise<string> {
+    const candidate = command.trim();
+    if (!candidate) throw new ZeroTokenRuntimeError("ZERO_TOKEN_RUNTIME_NOT_FOUND", `${kind} 运行时命令为空`);
+    if (isAbsolute(candidate) || candidate.includes("\\") || candidate.includes("/")) {
+      if (isFile(candidate)) return resolve(candidate);
+      throw new ZeroTokenRuntimeError("ZERO_TOKEN_RUNTIME_NOT_FOUND", `${kind} 运行时不存在：${candidate}`);
+    }
+    const locator = process.platform === "win32" ? "where.exe" : "which";
+    try {
+      const result = await execFileAsync(locator, [candidate], { windowsHide: true, timeout: 5_000 });
+      const located = String(result.stdout || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+      if (located) return located;
+    } catch {
+      // The friendly ZERO_TOKEN_RUNTIME_NOT_FOUND below includes the exact dependency name.
+    }
+    throw new ZeroTokenRuntimeError("ZERO_TOKEN_RUNTIME_NOT_FOUND", `未找到 ${kind} 运行时依赖：${candidate}`);
   }
+
+  private findRuntimeFile(source: string): string | null {
+    const normalized = source.trim();
+    if (!normalized) return null;
+    for (const candidate of runtimePathCandidates(normalized)) {
+      if (isFile(candidate) && runtimeKind(candidate)) return resolve(candidate);
+    }
+    return null;
+  }
+
+  private async resolveRuntimePaths(config: ZeroTokenSettings, port: number): Promise<RuntimeLaunchSpec> {
+    const configured = config.runtimePath.trim();
+    const envConfigured = process.env.PENGUIN_WEBMODEL_SOURCE?.trim() || "";
+    const explicitSource = configured || envConfigured;
+    const candidates = explicitSource
+      ? [explicitSource]
+      : [
+          this.options.getResourcesPath ? join(this.options.getResourcesPath(), "webmodel") : "",
+          this.options.getAppPath ? join(this.options.getAppPath(), "resources", "webmodel") : "",
+          join(this.options.getUserDataPath(), "webmodel-sidecar", "source"),
+        ];
+    let runtimePath = "";
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      if (explicitSource && !existsSync(candidate)) {
+        throw new ZeroTokenRuntimeError("ZERO_TOKEN_RUNTIME_NOT_FOUND", `Runtime路径：${resolve(candidate)} 不存在`);
+      }
+      const discovered = this.findRuntimeFile(candidate);
+      if (discovered) {
+        runtimePath = discovered;
+        break;
+      }
+    }
+    if (!runtimePath) {
+      const displayPath = explicitSource ? resolve(explicitSource) : "<未配置>";
+      throw new ZeroTokenRuntimeError(
+        "ZERO_TOKEN_RUNTIME_NOT_FOUND",
+        `Runtime路径：${displayPath} 未找到可启动的 .exe、.js 或 .py 文件。请在 ZeroToken 设置中选择 Runtime 文件或目录。`,
+      );
+    }
+
+    const kind = runtimeKind(runtimePath);
+    if (!kind) {
+      throw new ZeroTokenRuntimeError("ZERO_TOKEN_RUNTIME_NOT_FOUND", `Runtime路径：${runtimePath} 类型不支持，仅支持 .exe、.js、.py`);
+    }
+    const stateDir = join(this.options.getUserDataPath(), "webmodel-state");
+    const args = ["--port", String(port), "--host", "127.0.0.1", "--no-open", "--browser-mode", "launch", "--state-dir", stateDir];
+    const command = kind === "exe"
+      ? runtimePath
+      : await this.resolveRuntimeCommand(
+          kind === "node"
+            ? (process.env.PENGUIN_NODE_PATH?.trim() || (process.platform === "win32" ? "node.exe" : "node"))
+            : (process.env.PENGUIN_PYTHON_PATH?.trim() || (process.platform === "win32" ? "python.exe" : "python")),
+          kind,
+        );
+    const launchArgs = kind === "exe" ? args : [runtimePath, ...args];
+    const cwd = dirname(runtimePath);
+    if (!isDirectory(cwd)) throw new ZeroTokenRuntimeError("ZERO_TOKEN_START_FAILED", `cwd 不存在或不是目录：${cwd}`);
+    return { runtimePath, kind, command, args: launchArgs, cwd, stateDir };
+  }
+
 }
