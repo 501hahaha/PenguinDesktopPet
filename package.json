@@ -1,15 +1,15 @@
 {
   "name": "penguin-desktop-pet",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "private": true,
   "description": "A transparent Electron desktop pet built around the supplied penguin artwork.",
   "main": "out/main/main.js",
   "scripts": {
-    "prebuild": "node scripts/create-icons.mjs",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit",
+    "test:zerotoken": "tsc --target ES2022 --module CommonJS --moduleResolution Node --esModuleInterop --skipLibCheck --rootDir . --outDir out/zerotoken-self-test src/main/zerotoken/tests/ZeroTokenIntegrationTest.ts src/main/zerotoken/tests/ZeroTokenApiTest.ts src/main/zerotoken/api/ZeroTokenApiServer.ts && electron scripts/run-zerotoken-integration-test.cjs",
     "start": "electron .",
     "release:check": "node scripts/check-public-release.mjs",
     "release:checksums": "node scripts/create-checksums.mjs",
@@ -22,7 +22,6 @@
     "electron": "^37.2.6",
     "electron-builder": "^26.0.12",
     "electron-vite": "^4.0.0",
-    "pngjs": "^5.0.0",
     "typescript": "^5.8.3",
     "vite": "^7.0.0"
   },
@@ -80,6 +79,19 @@
         "from": "build/penguin-icon.png",
         "to": "penguin-icon.png"
       }
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "501hahaha",
+        "repo": "PenguinDesktopPet",
+        "releaseType": "release"
+      }
     ]
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/501hahaha/PenguinDesktopPet.git"
+  },
+  "homepage": "https://github.com/501hahaha/PenguinDesktopPet"
 }
