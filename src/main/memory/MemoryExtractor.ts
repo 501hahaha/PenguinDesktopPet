@@ -1,5 +1,6 @@
 import type { MemoryEntryKind, MemoryScope } from "../agents/orchestrationTypes";
 import type { MemoryDecision, MemoryObserverInput } from "./memoryTypes";
+import { memorySummaryForContent, memoryTypeForKind } from "./MemoryRanker";
 
 const MAX_EXTRACTED_LENGTH = 180;
 const CANONICAL_PREFIXES = [
@@ -210,10 +211,13 @@ export function extractMemoryDecisions(input: MemoryObserverInput): MemoryDecisi
     decisions.push({
       action: "ADD",
       kind: distilled.kind,
+      type: memoryTypeForKind(distilled.kind, distilled.scope),
       scope: distilled.scope,
       content: distilled.content,
+      summary: memorySummaryForContent(distilled.content),
       importance: importanceFor(distilled.kind),
       confidence: explicit ? 1 : 0.9,
+      createdAt: new Date().toISOString(),
       workspaceId: input.workspaceId,
       taskId: input.taskId,
       reason: explicit ? "explicit-distilled" : "durable-distilled",

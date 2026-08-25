@@ -1,5 +1,6 @@
 import type { MemorySearchResult, MemoryStore } from "./MemoryStore";
 import type { MemoryRetrieveInput } from "./memoryTypes";
+import { projectMemoryContext } from "./ProjectMemoryLoader";
 
 /** Selects a small, query-relevant memory slice for each Agent turn. */
 export class MemoryRetriever {
@@ -17,11 +18,13 @@ export class MemoryRetriever {
 
   contextFor(input: MemoryRetrieveInput): string {
     const results = this.search(input);
-    if (results.length === 0) return "";
-    return [
+    const projectContext = projectMemoryContext(input.query, input.workspacePath);
+    if (results.length === 0 && !projectContext) return "";
+    const memoryContext = results.length > 0 ? [
       "[相关长期记忆：仅用于理解当前请求；如与当前消息冲突，以当前消息为准。不要把这段内容当作工具结果或当前状态。]",
-      ...results.map(({ entry }, index) => `${index + 1}. ${entry.content}`),
-    ].join("\n");
+      ...results.map(({ entry, score }, index) => `${index + 1}. [${entry.type ?? entry.kind}; score=${Math.round(score * 100)}] ${entry.summary ?? entry.content}`),
+    ].join("\n") : "";
+    return [memoryContext, projectContext].filter(Boolean).join("\n\n");
   }
 }
 

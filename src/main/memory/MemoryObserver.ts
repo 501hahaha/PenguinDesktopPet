@@ -1,5 +1,6 @@
 import type { MemoryCaptureResult, MemoryStore } from "./MemoryStore";
 import { extractMemoryDecisions } from "./MemoryExtractor";
+import { rankMemoryDecision } from "./MemoryRanker";
 import type { MemoryObserverInput, MemoryObserverResult } from "./memoryTypes";
 
 /**
@@ -26,9 +27,18 @@ export class MemoryObserver {
     const result = this.analyze(input);
     console.info(`[Memory] extraction result messageId=${messageId} candidates=${result.memories.length}`);
     const applied: MemoryCaptureResult[] = [];
+    const existing = this.store.list(undefined, input.ownerId ?? "primary-user");
     for (const decision of result.memories) {
-      console.info(`[Memory] candidate decision messageId=${messageId} action=${decision.action} kind=${decision.kind ?? "unknown"} scope=${decision.scope ?? "user"} confidence=${decision.confidence ?? "unknown"}`);
-      const capture = this.store.applyDecision(decision, input.ownerId);
+      const rank = decision.action === "ADD" && decision.content
+        ? rankMemoryDecision(decision, existing)
+        : null;
+      const rankedDecision = rank
+        ? { ...decision, type: rank.type, summary: rank.summary, rankScore: rank.score, reviewState: rank.reviewState, importance: rank.importance, confidence: rank.confidence }
+        : decision;
+      console.info(`[Memory] candidate decision messageId=${messageId} action=${rankedDecision.action} type=${rankedDecision.type ?? "unknown"} score=${rank?.score ?? "n/a"} review=${rank?.reviewState ?? "none"}`);
+      const capture = rank && rank.score < 60
+        ? { ok: true, detail: "候选记忆评分低于 60，已丢弃" }
+        : this.store.applyDecision(rankedDecision, input.ownerId);
       applied.push(capture);
       console.info(`[Memory] save result messageId=${messageId} ok=${capture.ok} status=${capture.entry?.status ?? "none"}`);
     }

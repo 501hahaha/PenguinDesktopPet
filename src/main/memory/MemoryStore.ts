@@ -5,14 +5,24 @@ import { join } from "node:path";
 import type {
   MemoryEntry,
   MemoryEntryKind,
+  MemoryEntryType,
   MemoryEntryOperation,
   MemoryEntrySource,
   MemoryEntryStatus,
+  MemoryReviewState,
   MemoryScope,
 } from "../agents/orchestrationTypes";
 import { normalizeSafeText } from "../agents/orchestrationTypes";
 import type { MemoryDecision } from "./memoryTypes";
 import { extractMemoryDecisions, isCanonicalMemoryContent, isExplicitRememberRequest } from "./MemoryExtractor";
+import {
+  embeddingSimilarity,
+  localMemoryEmbedding,
+  memorySummaryForContent,
+  memoryTextSimilarity,
+  memoryTypeForKind,
+  rankMemoryDecision,
+} from "./MemoryRanker";
 
 const MAX_MEMORY_CONTENT_LENGTH = 600;
 const MAX_MEMORY_ROWS = 500;
@@ -67,6 +77,8 @@ type MemoryRow = MemoryEntry & { ownerKey: string };
 
 const MEMORY_KINDS = new Set<MemoryEntryKind>(["preference", "fact", "rule", "experience", "project_fact", "decision", "agent_rule", "workflow"]);
 const MEMORY_STATUSES = new Set<MemoryEntryStatus>(["pending", "approved", "rejected", "archived"]);
+const MEMORY_TYPES = new Set<MemoryEntryType>(["user_profile", "preference", "project", "decision", "skill", "behavior", "knowledge", "temporary"]);
+const MEMORY_REVIEW_STATES = new Set<MemoryReviewState>(["none", "review"]);
 const DEFAULT_MEMORY_IMPORTANCE = 0.7;
 const DEFAULT_MEMORY_CONFIDENCE = 0.75;
 
@@ -92,6 +104,11 @@ function boundedScore(value: unknown, fallback: number): number {
   return Number.isFinite(parsed) ? Math.max(0, Math.min(1, parsed)) : fallback;
 }
 
+function boundedRankScore(value: unknown, fallback = 0): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(100, parsed)) : fallback;
+}
+
 function memoryTokens(value: string): Set<string> {
   const normalized = value.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
   const tokens = new Set<string>();
@@ -105,16 +122,6 @@ function memoryTokens(value: string): Set<string> {
     }
   }
   return tokens;
-}
-
-function tokenSimilarity(left: string, right: string): number {
-  if (left.trim() === right.trim()) return 1;
-  const leftTokens = memoryTokens(left);
-  const rightTokens = memoryTokens(right);
-  if (leftTokens.size === 0 || rightTokens.size === 0) return 0;
-  let intersection = 0;
-  for (const token of leftTokens) if (rightTokens.has(token)) intersection += 1;
-  return intersection / Math.max(1, Math.min(leftTokens.size, rightTokens.size));
 }
 
 function safeWorkspaceId(value: unknown): string | undefined {
@@ -133,20 +140,29 @@ function now(): string {
 }
 
 function rowToEntry(row: Record<string, unknown>): MemoryEntry {
+  const kind = String(row.kind ?? "fact") as MemoryEntryKind;
+  const scope = String(row.scope ?? "user") as MemoryScope;
+  const content = String(row.content ?? "");
   return {
     id: String(row.id ?? ""),
-    scope: String(row.scope ?? "user") as MemoryScope,
-    kind: String(row.kind ?? "fact") as MemoryEntryKind,
+    scope,
+    kind,
+    type: MEMORY_TYPES.has(String(row.type) as MemoryEntryType) ? String(row.type) as MemoryEntryType : memoryTypeForKind(kind, scope),
     operation: String(row.operation ?? "add") as MemoryEntryOperation,
     targetId: typeof row.target_id === "string" ? row.target_id : undefined,
-    content: String(row.content ?? ""),
+    content,
+    summary: typeof row.summary === "string" && row.summary.trim() ? row.summary : memorySummaryForContent(content),
+    embedding: typeof row.embedding === "string" ? row.embedding : localMemoryEmbedding(content),
     source: String(row.source ?? "system") as MemoryEntrySource,
     status: String(row.status ?? "pending") as MemoryEntryStatus,
     workspaceId: typeof row.workspace_id === "string" ? row.workspace_id : undefined,
     taskId: typeof row.task_id === "string" ? row.task_id : undefined,
     importance: boundedScore(row.importance, DEFAULT_MEMORY_IMPORTANCE),
     confidence: boundedScore(row.confidence, DEFAULT_MEMORY_CONFIDENCE),
+    rankScore: boundedRankScore(row.rank_score, Math.round(boundedScore(row.importance, DEFAULT_MEMORY_IMPORTANCE) * 100)),
+    reviewState: MEMORY_REVIEW_STATES.has(String(row.review_state) as MemoryReviewState) ? String(row.review_state) as MemoryReviewState : "none",
     lastAccessedAt: typeof row.last_accessed_at === "string" ? row.last_accessed_at : undefined,
+    lastUsedAt: typeof row.last_used_at === "string" ? row.last_used_at : (typeof row.last_accessed_at === "string" ? row.last_accessed_at : undefined),
     accessCount: Number.isFinite(Number(row.access_count)) ? Math.max(0, Number(row.access_count)) : 0,
     createdAt: String(row.created_at ?? now()),
     updatedAt: String(row.updated_at ?? now()),
@@ -178,16 +194,22 @@ export class MemoryStore {
         owner_key TEXT NOT NULL,
         scope TEXT NOT NULL,
         kind TEXT NOT NULL,
+        type TEXT NOT NULL DEFAULT 'knowledge',
         operation TEXT NOT NULL,
         target_id TEXT,
         content TEXT NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        embedding TEXT,
         source TEXT NOT NULL,
         status TEXT NOT NULL,
+        review_state TEXT NOT NULL DEFAULT 'none',
         workspace_id TEXT,
         task_id TEXT,
         importance REAL NOT NULL DEFAULT 0.7,
         confidence REAL NOT NULL DEFAULT 0.75,
+        rank_score REAL NOT NULL DEFAULT 0,
         last_accessed_at TEXT,
+        last_used_at TEXT,
         access_count INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -202,8 +224,15 @@ export class MemoryStore {
     `);
     this.ensureColumn("importance", "REAL NOT NULL DEFAULT 0.7");
     this.ensureColumn("confidence", "REAL NOT NULL DEFAULT 0.75");
+    this.ensureColumn("type", "TEXT NOT NULL DEFAULT 'knowledge'");
+    this.ensureColumn("summary", "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn("embedding", "TEXT");
+    this.ensureColumn("review_state", "TEXT NOT NULL DEFAULT 'none'");
+    this.ensureColumn("rank_score", "REAL NOT NULL DEFAULT 0");
     this.ensureColumn("last_accessed_at", "TEXT");
+    this.ensureColumn("last_used_at", "TEXT");
     this.ensureColumn("access_count", "INTEGER NOT NULL DEFAULT 0");
+    this.backfillMetadata();
     this.rebuildIndexIfNeeded();
     this.writeMarkdownFiles();
   }
@@ -261,10 +290,14 @@ export class MemoryStore {
       const capture = this.add({
         scope: decision.scope ?? "user",
         kind: decision.kind ?? memoryKindFor(decision.content ?? ""),
+        type: decision.type ?? memoryTypeForKind(decision.kind ?? memoryKindFor(decision.content ?? ""), decision.scope ?? "user"),
         operation: "add",
         content: decision.content ?? "",
+        summary: decision.summary ?? memorySummaryForContent(decision.content ?? ""),
         source: "explicit-user",
         status: "approved",
+        rankScore: 100,
+        reviewState: "none",
         workspaceId,
       }, ownerKey);
       if (capture.entry) entries.push(capture.entry);
@@ -349,16 +382,15 @@ export class MemoryStore {
   propose(content: string, options: { kind?: MemoryEntryKind; scope?: MemoryScope; workspaceId?: string; taskId?: string } = {}, ownerId = MEMORY_OWNER): MemoryCaptureResult {
     const safeContent = safeMemoryContent(content);
     if (!safeContent) return { ok: false, detail: "这条内容包含敏感信息、路径或无效文本，未写入记忆" };
-    return this.add({
+    return this.applyDecision({
+      action: "ADD",
       scope: options.scope ?? "user",
       kind: options.kind ?? memoryKindFor(safeContent),
-      operation: "add",
       content: safeContent,
-      source: "learning-candidate",
-      status: "pending",
       workspaceId: options.workspaceId,
       taskId: options.taskId,
-    }, this.resolveOwnerKey(ownerId));
+      reason: "auto-extractor",
+    }, ownerId);
   }
 
   list(status?: MemoryEntryStatus, ownerId?: string): MemoryEntry[] {
@@ -416,7 +448,7 @@ export class MemoryStore {
       return true;
     });
     const ranked = candidates.map((entry) => {
-      const overlap = tokenSimilarity(normalizedQuery, entry.content);
+      const overlap = embeddingSimilarity(localMemoryEmbedding(normalizedQuery), entry.embedding) || memoryTextSimilarity(normalizedQuery, entry.content);
       const scopeMatch = scopes.includes(entry.scope)
         ? 1
         : scopes.some((scope) => entry.scope.startsWith(`${scope}:`))
@@ -424,7 +456,8 @@ export class MemoryStore {
           : 0;
       const ageMs = Math.max(0, Date.now() - Date.parse(entry.updatedAt));
       const recency = Number.isFinite(ageMs) ? Math.max(0, Math.min(1, 1 - ageMs / (1000 * 60 * 60 * 24 * 90))) : 0;
-      const score = overlap * 0.55 + (entry.importance ?? DEFAULT_MEMORY_IMPORTANCE) * 0.2 + scopeMatch * 0.15 + recency * 0.1;
+      const rank = (entry.rankScore ?? Math.round((entry.importance ?? DEFAULT_MEMORY_IMPORTANCE) * 100)) / 100;
+      const score = overlap * 0.5 + rank * 0.25 + scopeMatch * 0.15 + recency * 0.1;
       return { entry, score, overlap, scopeMatch };
     })
       .filter((item) => item.overlap > 0 || item.scopeMatch > 0)
@@ -433,9 +466,10 @@ export class MemoryStore {
     const timestamp = now();
     for (const item of ranked) {
       const accessCount = (item.entry.accessCount ?? 0) + 1;
-      this.db.prepare("UPDATE memories SET last_accessed_at = ?, access_count = ? WHERE id = ? AND owner_key = ?")
-        .run(timestamp, accessCount, item.entry.id, ownerKey);
+      this.db.prepare("UPDATE memories SET last_accessed_at = ?, last_used_at = ?, access_count = ? WHERE id = ? AND owner_key = ?")
+        .run(timestamp, timestamp, accessCount, item.entry.id, ownerKey);
       item.entry.lastAccessedAt = timestamp;
+      item.entry.lastUsedAt = timestamp;
       item.entry.accessCount = accessCount;
     }
     return ranked.map(({ entry, score }) => ({ entry, score }));
@@ -460,7 +494,7 @@ export class MemoryStore {
     const targetId = safeMemoryId(decision.targetId);
     const best = content
       ? candidates
-        .map((entry) => ({ entry, similarity: tokenSimilarity(content, entry.content) }))
+        .map((entry) => ({ entry, similarity: embeddingSimilarity(localMemoryEmbedding(content), entry.embedding) || memoryTextSimilarity(content, entry.content) }))
         .sort((left, right) => right.similarity - left.similarity)[0]
       : undefined;
     const exactTarget = targetId ? candidates.find((entry) => entry.id === targetId) : undefined;
@@ -472,10 +506,19 @@ export class MemoryStore {
     }
     if (!content) return { ok: false, detail: "这条记忆内容无效或包含敏感信息，未写入记忆" };
 
-    const importance = boundedScore(decision.importance, DEFAULT_MEMORY_IMPORTANCE);
-    const confidence = boundedScore(decision.confidence, DEFAULT_MEMORY_CONFIDENCE);
     const scope = decision.scope ?? "user";
     const kind = decision.kind ?? memoryKindFor(content);
+    const rank = action === "ADD"
+      ? rankMemoryDecision({ ...decision, kind, scope, content }, candidates)
+      : null;
+    if (rank && rank.score < 60) return { ok: true, detail: "候选记忆评分低于 60，已丢弃" };
+    const importance = boundedScore(decision.importance ?? rank?.importance, DEFAULT_MEMORY_IMPORTANCE);
+    const confidence = boundedScore(decision.confidence ?? rank?.confidence, DEFAULT_MEMORY_CONFIDENCE);
+    const type = decision.type ?? rank?.type ?? memoryTypeForKind(kind, scope);
+    const summary = decision.summary ?? rank?.summary ?? memorySummaryForContent(content);
+    const embedding = rank?.embedding ?? localMemoryEmbedding(content);
+    const rankScore = boundedRankScore(decision.rankScore ?? rank?.score, Math.round(importance * 100));
+    const reviewState = decision.reviewState ?? rank?.reviewState ?? (rankScore >= 90 ? "none" : "review");
     if (action === "UPDATE") {
       const target = exactTarget ?? (best && best.similarity >= 0.35 ? best.entry : undefined);
       if (target) {
@@ -483,6 +526,9 @@ export class MemoryStore {
           content,
           scope,
           kind,
+          type,
+          summary,
+          embedding,
           operation: "replace",
           source: "approved-learning",
           status: "approved",
@@ -491,25 +537,32 @@ export class MemoryStore {
           taskId: decision.taskId ?? target.taskId,
           importance,
           confidence,
+          rankScore,
+          reviewState: "none",
         });
       }
       return this.add({
         scope,
         kind,
+        type,
+        summary,
+        embedding,
         operation: "add",
         content,
         source: "approved-learning",
         status: "approved",
         importance,
         confidence,
+        rankScore,
+        reviewState: "none",
         workspaceId: decision.workspaceId,
         taskId: decision.taskId,
       }, ownerKey);
     }
 
     if (best && best.similarity >= 0.9) {
-      if (best.entry.status === "pending" && confidence >= 0.8 && importance >= 0.6) {
-        return this.updateEntryByOwnerKey(best.entry.id, ownerKey, { status: "approved", importance, confidence });
+      if (best.entry.status === "pending" && rankScore >= 60) {
+        return this.updateEntryByOwnerKey(best.entry.id, ownerKey, { status: "approved", importance, confidence, rankScore, reviewState });
       }
       return { ok: true, detail: best.entry.status === "approved" ? "这条记忆已经存在" : "相同的记忆候选已经在审核队列中", entry: best.entry };
     }
@@ -518,24 +571,34 @@ export class MemoryStore {
         content,
         scope,
         kind,
+        type,
+        summary,
+        embedding,
         operation: "replace",
-        source: "approved-learning",
-        status: confidence >= 0.8 && importance >= 0.6 ? "approved" : best.entry.status,
+        source: "auto-extractor",
+        status: rankScore >= 60 ? "approved" : best.entry.status,
         workspaceId: decision.workspaceId,
         taskId: decision.taskId ?? best.entry.taskId,
         importance,
         confidence,
+        rankScore,
+        reviewState,
       });
     }
     return this.add({
       scope,
       kind,
+      type,
+      summary,
+      embedding,
       operation: "add",
       content,
-      source: confidence >= 0.8 && importance >= 0.6 ? "approved-learning" : "learning-candidate",
-      status: confidence >= 0.8 && importance >= 0.6 ? "approved" : "pending",
+      source: rank ? "auto-extractor" : (confidence >= 0.8 && importance >= 0.6 ? "approved-learning" : "learning-candidate"),
+      status: rankScore >= 60 ? "approved" : "pending",
       importance,
       confidence,
+      rankScore,
+      reviewState,
       workspaceId: decision.workspaceId,
       taskId: decision.taskId,
     }, ownerKey);
@@ -559,7 +622,7 @@ export class MemoryStore {
     const target = latestOnly || !targetText
       ? ownerEntries[0]
       : ownerEntries
-        .map((entry) => ({ entry, similarity: tokenSimilarity(targetText, entry.content) }))
+        .map((entry) => ({ entry, similarity: memoryTextSimilarity(targetText, entry.content) }))
         .sort((left, right) => right.similarity - left.similarity)[0]?.entry;
     if (!target) return { ok: false, detail: "没有找到匹配的长期记忆" };
     return this.removeByOwnerKey(target.id, this.resolveOwnerKey(ownerId));
@@ -618,6 +681,27 @@ export class MemoryStore {
     this.db.exec(`ALTER TABLE memories ADD COLUMN ${column} ${definition}`);
   }
 
+  private backfillMetadata(): void {
+    const rows = this.db.prepare("SELECT id, scope, kind, content, type, summary, embedding, importance, rank_score FROM memories").all() as Array<Record<string, unknown>>;
+    const update = this.db.prepare("UPDATE memories SET type = ?, summary = ?, embedding = ?, rank_score = ?, review_state = ? WHERE id = ?");
+    for (const row of rows) {
+      const content = String(row.content ?? "");
+      const kind = String(row.kind ?? "fact") as MemoryEntryKind;
+      const scope = String(row.scope ?? "user");
+      const existingType = String(row.type ?? "");
+      const type = existingType && existingType !== "knowledge"
+        ? (MEMORY_TYPES.has(existingType as MemoryEntryType) ? existingType as MemoryEntryType : memoryTypeForKind(kind, scope))
+        : memoryTypeForKind(kind, scope);
+      const summary = typeof row.summary === "string" && row.summary.trim() ? row.summary : memorySummaryForContent(content);
+      const embedding = typeof row.embedding === "string" && row.embedding.trim() ? row.embedding : localMemoryEmbedding(content);
+      const importanceScore = Math.round(boundedScore(row.importance, DEFAULT_MEMORY_IMPORTANCE) * 100);
+      const storedRankScore = Number(row.rank_score);
+      const rankScore = Number.isFinite(storedRankScore) && storedRankScore > 0 ? boundedRankScore(storedRankScore, importanceScore) : importanceScore;
+      const reviewState = rankScore >= 90 ? "none" : rankScore >= 60 ? "review" : "none";
+      update.run(type, summary, embedding, rankScore, reviewState, String(row.id ?? ""));
+    }
+  }
+
   private add(input: Omit<MemoryEntry, "id" | "createdAt" | "updatedAt">, ownerKey = this.ownerKey): MemoryCaptureResult {
     const content = safeMemoryContent(input.content);
     if (!content) return { ok: false, detail: "这条内容包含敏感信息、路径或无效文本，未写入记忆" };
@@ -638,16 +722,21 @@ export class MemoryStore {
       workspaceId: safeWorkspaceId(input.workspaceId),
       targetId: safeMemoryId(input.targetId) ?? undefined,
       taskId: safeMemoryId(input.taskId) ?? undefined,
+      type: input.type ?? memoryTypeForKind(input.kind, input.scope),
+      summary: input.summary?.trim().slice(0, 180) || memorySummaryForContent(content),
+      embedding: input.embedding || localMemoryEmbedding(content),
       importance: boundedScore(input.importance, DEFAULT_MEMORY_IMPORTANCE),
       confidence: boundedScore(input.confidence, DEFAULT_MEMORY_CONFIDENCE),
+      rankScore: boundedRankScore(input.rankScore, Math.round(boundedScore(input.importance, DEFAULT_MEMORY_IMPORTANCE) * 100)),
+      reviewState: input.reviewState ?? "none",
       accessCount: Math.max(0, Math.floor(Number(input.accessCount) || 0)),
       createdAt: timestamp,
       updatedAt: timestamp,
     };
     this.db.prepare(`
-      INSERT INTO memories (id, owner_key, scope, kind, operation, target_id, content, source, status, workspace_id, task_id, importance, confidence, last_accessed_at, access_count, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(entry.id, ownerKey, entry.scope, entry.kind, entry.operation, entry.targetId ?? null, entry.content, entry.source, entry.status, entry.workspaceId ?? null, entry.taskId ?? null, entry.importance ?? DEFAULT_MEMORY_IMPORTANCE, entry.confidence ?? DEFAULT_MEMORY_CONFIDENCE, entry.lastAccessedAt ?? null, entry.accessCount ?? 0, entry.createdAt, entry.updatedAt);
+      INSERT INTO memories (id, owner_key, scope, kind, type, operation, target_id, content, summary, embedding, source, status, review_state, workspace_id, task_id, importance, confidence, rank_score, last_accessed_at, last_used_at, access_count, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(entry.id, ownerKey, entry.scope, entry.kind, entry.type ?? memoryTypeForKind(entry.kind, entry.scope), entry.operation, entry.targetId ?? null, entry.content, entry.summary ?? memorySummaryForContent(entry.content), entry.embedding ?? localMemoryEmbedding(entry.content), entry.source, entry.status, entry.reviewState ?? "none", entry.workspaceId ?? null, entry.taskId ?? null, entry.importance ?? DEFAULT_MEMORY_IMPORTANCE, entry.confidence ?? DEFAULT_MEMORY_CONFIDENCE, entry.rankScore ?? 0, entry.lastAccessedAt ?? null, entry.lastUsedAt ?? null, entry.accessCount ?? 0, entry.createdAt, entry.updatedAt);
     this.db.prepare("INSERT INTO memory_fts (id, owner_key, content) VALUES (?, ?, ?)").run(entry.id, ownerKey, entry.content);
     if (ownerKey === this.ownerKey) this.writeMarkdownFiles();
     this.notify();
@@ -673,7 +762,7 @@ export class MemoryStore {
   private updateEntryByOwnerKey(
     id: string,
     ownerKey: string,
-    patch: Partial<Pick<MemoryEntry, "scope" | "kind" | "operation" | "targetId" | "content" | "source" | "status" | "workspaceId" | "taskId" | "importance" | "confidence">>,
+    patch: Partial<Pick<MemoryEntry, "scope" | "kind" | "type" | "operation" | "targetId" | "content" | "summary" | "embedding" | "source" | "status" | "reviewState" | "workspaceId" | "taskId" | "importance" | "confidence" | "rankScore">>,
   ): MemoryCaptureResult {
     const normalizedId = safeMemoryId(id);
     if (!normalizedId) return { ok: false, detail: "记忆编号无效" };
@@ -688,18 +777,23 @@ export class MemoryStore {
       ...patch,
       id: current.id,
       content,
+      type: patch.type ?? current.type ?? memoryTypeForKind(patch.kind ?? current.kind, patch.scope ?? current.scope),
+      summary: patch.summary?.trim().slice(0, 180) || current.summary || memorySummaryForContent(content),
+      embedding: patch.embedding || current.embedding || localMemoryEmbedding(content),
       targetId: safeMemoryId(patch.targetId ?? current.targetId) ?? undefined,
       workspaceId: patch.workspaceId === undefined ? current.workspaceId : safeWorkspaceId(patch.workspaceId),
       taskId: safeMemoryId(patch.taskId ?? current.taskId) ?? undefined,
       importance: boundedScore(patch.importance ?? current.importance, DEFAULT_MEMORY_IMPORTANCE),
       confidence: boundedScore(patch.confidence ?? current.confidence, DEFAULT_MEMORY_CONFIDENCE),
+      rankScore: boundedRankScore(patch.rankScore ?? current.rankScore, Math.round(boundedScore(patch.importance ?? current.importance, DEFAULT_MEMORY_IMPORTANCE) * 100)),
+      reviewState: patch.reviewState ?? current.reviewState ?? "none",
       updatedAt: timestamp,
     };
     this.db.prepare(`
       UPDATE memories
-      SET scope = ?, kind = ?, operation = ?, target_id = ?, content = ?, source = ?, status = ?, workspace_id = ?, task_id = ?, importance = ?, confidence = ?, updated_at = ?
+      SET scope = ?, kind = ?, type = ?, operation = ?, target_id = ?, content = ?, summary = ?, embedding = ?, source = ?, status = ?, review_state = ?, workspace_id = ?, task_id = ?, importance = ?, confidence = ?, rank_score = ?, updated_at = ?
       WHERE id = ? AND owner_key = ?
-    `).run(next.scope, next.kind, next.operation, next.targetId ?? null, next.content, next.source, next.status, next.workspaceId ?? null, next.taskId ?? null, next.importance ?? DEFAULT_MEMORY_IMPORTANCE, next.confidence ?? DEFAULT_MEMORY_CONFIDENCE, next.updatedAt, normalizedId, ownerKey);
+    `).run(next.scope, next.kind, next.type ?? memoryTypeForKind(next.kind, next.scope), next.operation, next.targetId ?? null, next.content, next.summary ?? memorySummaryForContent(next.content), next.embedding ?? localMemoryEmbedding(next.content), next.source, next.status, next.reviewState ?? "none", next.workspaceId ?? null, next.taskId ?? null, next.importance ?? DEFAULT_MEMORY_IMPORTANCE, next.confidence ?? DEFAULT_MEMORY_CONFIDENCE, next.rankScore ?? 0, next.updatedAt, normalizedId, ownerKey);
     this.db.prepare("DELETE FROM memory_fts WHERE id = ?").run(normalizedId);
     this.db.prepare("INSERT INTO memory_fts (id, owner_key, content) VALUES (?, ?, ?)").run(normalizedId, ownerKey, next.content);
     if (ownerKey === this.ownerKey) this.writeMarkdownFiles();
@@ -732,7 +826,7 @@ export class MemoryStore {
       "",
       "<!-- This file is generated from the local memory index. Edit through the desktop pet memory panel. -->",
       "",
-      ...(entries.length > 0 ? entries.map((entry) => `- [${entry.kind}] ${entry.content}`) : ["- 暂无已确认内容"]),
+      ...(entries.length > 0 ? entries.map((entry) => `- [${entry.type ?? entry.kind}; score=${entry.rankScore ?? Math.round((entry.importance ?? DEFAULT_MEMORY_IMPORTANCE) * 100)}; ${entry.reviewState ?? "none"}] ${entry.summary ?? entry.content}`) : ["- 暂无已确认内容"]),
       "",
     ].join("\n");
     writeFileSync(join(this.rootPath, "USER.md"), render("USER", approved.filter((entry) => entry.scope === "user")), "utf8");
