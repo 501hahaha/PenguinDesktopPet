@@ -15,7 +15,11 @@ export const DEFAULT_PET_STATUS_LIGHT_MOTION: PetStatusLightMotion = "static";
 
 export interface ZeroTokenSettings {
   enabled: boolean;
+  /** Web site used for the embedded login Session. */
+  provider: "chatgpt-web" | "claude-web" | "gemini-web";
   baseUrl: string;
+  /** Absolute path to a ZeroToken executable, Node script, Python script, or its containing directory. */
+  runtimePath: string;
   /** Empty means resolve the first model advertised by WebModel. */
   model: string;
   timeout: number;
@@ -24,10 +28,12 @@ export interface ZeroTokenSettings {
 
 export const DEFAULT_ZERO_TOKEN_SETTINGS: ZeroTokenSettings = {
   enabled: false,
+  provider: "chatgpt-web",
   baseUrl: "http://127.0.0.1:3456/v1",
+  runtimePath: "",
   model: "",
   timeout: 120_000,
-  autoStart: false,
+  autoStart: true,
 };
 
 export function defaultZeroTokenSettings(): ZeroTokenSettings {
@@ -41,6 +47,10 @@ export function normalizeZeroTokenSettings(value: unknown): ZeroTokenSettings {
   const baseUrl = typeof raw.baseUrl === "string" && raw.baseUrl.trim()
     ? raw.baseUrl.trim().replace(/\/+$/, "")
     : defaults.baseUrl;
+  const runtimePath = typeof raw.runtimePath === "string" ? raw.runtimePath.trim().slice(0, 500) : defaults.runtimePath;
+  const provider = raw.provider === "claude-web" || raw.provider === "gemini-web" || raw.provider === "chatgpt-web"
+    ? raw.provider
+    : defaults.provider;
   const model = typeof raw.model === "string" ? raw.model.trim().slice(0, 180) : defaults.model;
   const timeoutValue = typeof raw.timeout === "number" ? raw.timeout : Number(raw.timeout);
   const timeout = Number.isFinite(timeoutValue)
@@ -48,10 +58,12 @@ export function normalizeZeroTokenSettings(value: unknown): ZeroTokenSettings {
     : defaults.timeout;
   return {
     enabled: raw.enabled === true,
+    provider,
     baseUrl,
+    runtimePath,
     model,
     timeout,
-    autoStart: raw.autoStart === true,
+    autoStart: typeof raw.autoStart === "boolean" ? raw.autoStart : defaults.autoStart,
   };
 }
 
