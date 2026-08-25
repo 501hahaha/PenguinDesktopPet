@@ -14,9 +14,15 @@ import { MemoryRetriever } from "./memory/MemoryRetriever";
 import { needsMemoryReorganization } from "./memory/MemoryExtractor";
 import type { MemoryOperationStats, MemoryRebuildResult } from "./memory/memoryTypes";
 import { readCcSwitchProfilesCached, readCcSwitchRuntimeConfig, readCcSwitchStatus } from "./ccSwitch";
-import { checkZeroTokenConnection, configureZeroTokenRuntimeManager, statusFromRuntime, type ZeroTokenProviderStatus } from "./agents/ZeroTokenProvider";
+import { checkZeroTokenConnection, configureZeroTokenRuntime, configureZeroTokenWebAIClient, createZeroTokenProvider, statusFromEmbedded, type ZeroTokenProviderStatus } from "./agents/ZeroTokenProvider";
 import { WebModelRuntimeManager } from "./agents/WebModelRuntimeManager";
 import type { WebModelRuntimeState } from "./agents/WebModelRuntimeTypes";
+import { ZeroTokenRuntime } from "./zerotoken/ZeroTokenRuntime";
+import { createWebAIClient } from "./zerotoken/WebAIClient";
+import { ChatGPTWebAdapter } from "./zerotoken/providers/ChatGPTWebAdapter";
+import { ZeroTokenApiServer } from "./zerotoken/api/ZeroTokenApiServer";
+import { ZERO_TOKEN_PROVIDERS, type ZeroTokenProviderId } from "./zerotoken/types";
+import type { ZeroTokenApiSettings } from "./runtime/types";
 import { checkForUpdate } from "./updateService";
 import type { CcSwitchAgentProfile, CcSwitchImportResult, CcSwitchStatus, UpdateCheckResult } from "./systemTypes";
 import {
@@ -297,6 +303,7 @@ let activeWindowDrag:
   | null = null;
 let enforcingPetBounds = false;
 let enforcingSettingsBounds = false;
+let userHasInteractedWithPetWindow = false;
 let petShapeBounds: WindowShapeBounds | null = null;
 let petWindowExpanded = false;
 let dataDeletionInProgress = false;
@@ -347,10 +354,37 @@ const webModelRuntimeManager = new WebModelRuntimeManager({
   getUserDataPath: () => app.getPath("userData"),
   getResourcesPath: () => process.resourcesPath,
   getAppPath: () => app.getAppPath(),
-  onStateChanged: () => broadcastZeroTokenRuntime(),
+  // Legacy manager is kept for compatibility only; Phase 1 does not start it.
+  onStateChanged: () => undefined,
   onModelSelected: (modelId) => persistZeroTokenModel(modelId),
 });
-configureZeroTokenRuntimeManager(webModelRuntimeManager);
+const zeroTokenRuntime = new ZeroTokenRuntime();
+configureZeroTokenRuntime(zeroTokenRuntime);
+configureZeroTokenWebAIClient(createWebAIClient([
+  new ChatGPTWebAdapter(zeroTokenRuntime.browserManager, zeroTokenRuntime.sessionManager),
+]));
+// This configuration intentionally lives in the main process.  The renderer
+// receives neither the auth token nor this object through settings IPC.
+const zeroTokenApiSettings: ZeroTokenApiSettings = {
+  auth: { enabled: process.env.PENGUIN_ZEROTOKEN_API_AUTH === "1" },
+};
+const zeroTokenApiToken = process.env.PENGUIN_ZEROTOKEN_API_TOKEN?.trim()
+  || randomBytes(32).toString("hex");
+const zeroTokenApiServer = new ZeroTokenApiServer({
+  host: "127.0.0.1",
+  port: 3456,
+  provider: () => createZeroTokenProvider(petSettings.zeroToken),
+  auth: {
+    enabled: zeroTokenApiSettings.auth.enabled,
+    token: zeroTokenApiToken,
+  },
+});
+zeroTokenRuntime.subscribe((status) => {
+  const selected = status.provider === petSettings.zeroToken.provider
+    ? status
+    : undefined;
+  if (selected) broadcastZeroTokenStatus(statusFromEmbedded(selected));
+});
 
 async function cleanupStep(label: string, action: () => void | Promise<void>): Promise<void> {
   try {
@@ -380,7 +414,8 @@ function cleanupAppResources(): Promise<void> {
 
     qqQrLoginManager.cancel();
     feishuQrLoginManager.cancel();
-    await cleanupStep("WebModel Runtime", () => webModelRuntimeManager.stop());
+    await cleanupStep("Zero Token API server", () => zeroTokenApiServer.stop());
+    await cleanupStep("Zero Token browser sessions", () => zeroTokenRuntime.dispose());
     await cleanupStep("WeChat bridge", () => weChatBridge?.stop());
     await Promise.all([
       ...[...qqChannelAdapters.values()].map((adapter) => cleanupStep(`QQ channel ${adapter.channelId}`, () => adapter.stop())),
@@ -1961,9 +1996,23 @@ function currentPetWindowHeight(): number {
 }
 
 function broadcastZeroTokenRuntime(): void {
-  const status = statusFromRuntime(webModelRuntimeManager.getState());
+  void zeroTokenRuntime.getStatus(petSettings.zeroToken.provider).then((embedded) => {
+    broadcastZeroTokenStatus(statusFromEmbedded(embedded));
+  }).catch((error) => {
+    console.warn(`[ZeroToken] status broadcast failed: ${error instanceof Error ? error.message : String(error)}`);
+  });
+}
+
+function broadcastZeroTokenStatus(status: ZeroTokenProviderStatus): void {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("zero-token:runtime", status);
   if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.webContents.send("zero-token:runtime", status);
+}
+
+function normalizeZeroTokenProvider(raw: unknown, fallback: ZeroTokenProviderId): ZeroTokenProviderId {
+  if (typeof raw === "string" && ZERO_TOKEN_PROVIDERS.some((provider) => provider.id === raw)) {
+    return raw as ZeroTokenProviderId;
+  }
+  return fallback;
 }
 
 function persistZeroTokenModel(modelId: string): void {
@@ -2114,8 +2163,14 @@ function createWindow() {
   mainWindow.setMaximumSize(PET_WINDOW_WIDTH, PET_WINDOW_EXPANDED_HEIGHT);
 
   keepPetWindowOnTop(true);
-  mainWindow.on("resize", () => enforcePetWindowBounds());
-  mainWindow.on("move", () => publishPetWindowEdge(activeWindowDrag?.desktop));
+  mainWindow.on("resize", () => {
+    userHasInteractedWithPetWindow = true;
+    enforcePetWindowBounds();
+  });
+  mainWindow.on("move", () => {
+    userHasInteractedWithPetWindow = true;
+    publishPetWindowEdge(activeWindowDrag?.desktop);
+  });
   mainWindow.once("ready-to-show", () => {
     mainWindow?.showInactive();
     keepPetWindowOnTop(true);
@@ -2912,6 +2967,13 @@ async function notifyAgentEvent(event: AgentEvent): Promise<void> {
   const completion = rawCompletion as AgentTaskCompletion;
   const settings = getPetSettings();
   if (!settings.petPerception.enabled || completion.surface === "internal" || completion.source === "delegation") return;
+
+  // 如果用户从未与宠物窗口交互过，不发送任务完成通知
+  if (!userHasInteractedWithPetWindow) {
+    console.info(`[AgentTaskNotify] skipping notification - user has not interacted with pet window yet`);
+    return;
+  }
+
   const noticeText = formatAgentEventNotification({
     status: completion.terminalState === "interrupted"
       ? "interrupted"
@@ -3306,6 +3368,7 @@ function queueChannelAgentReply(event: BotChannelEvent): void {
           query: message.text,
           ownerId: memoryOwnerId,
           workspaceId: runtimeConfig.agentWorkspace,
+          workspacePath: runtimeConfig.agentWorkspace,
           projectScope: memoryProjectScope(runtimeConfig.agentWorkspace),
           agentScope: `agent:${activeAgent.id}`,
           limit: 6,
@@ -3987,53 +4050,99 @@ app.whenReady().then(async () => {
       : petSettings.zeroToken;
     return checkZeroTokenConnection(config);
   });
-  ipcMain.handle("zero-token:runtime", (): ZeroTokenProviderStatus => statusFromRuntime(webModelRuntimeManager.getState()));
-  ipcMain.handle("zero-token:providers", (_event, rawConfig: unknown) => {
-    const config = rawConfig && typeof rawConfig === "object"
-      ? normalizeZeroTokenSettings(rawConfig)
-      : petSettings.zeroToken;
-    return webModelRuntimeManager.getProviders(config);
+  ipcMain.handle("zero-token:runtime", async (): Promise<ZeroTokenProviderStatus> => {
+    const status = await zeroTokenRuntime.getStatus(petSettings.zeroToken.provider);
+    return statusFromEmbedded(status);
+  });
+  ipcMain.handle("zero-token:status", async (_event, rawProviderId: unknown): Promise<ZeroTokenProviderStatus> => {
+    const providerId = normalizeZeroTokenProvider(rawProviderId, petSettings.zeroToken.provider);
+    return statusFromEmbedded(await zeroTokenRuntime.getStatus(providerId));
+  });
+  ipcMain.handle("zero-token:start", (_event, rawConfig: unknown) => {
+    const config = rawConfig && typeof rawConfig === "object" ? normalizeZeroTokenSettings(rawConfig) : petSettings.zeroToken;
+    return zeroTokenRuntime.initialize().then(() => zeroTokenRuntime.getStatus(config.provider)).then(statusFromEmbedded);
+  });
+  ipcMain.handle("zero-token:stop", async () => {
+    zeroTokenRuntime.dispose();
+    return statusFromEmbedded({
+      provider: petSettings.zeroToken.provider,
+      name: "Zero Token",
+      status: "stopped",
+      detail: "Zero Token 已停止",
+      lastError: null,
+      updatedAt: Date.now(),
+    });
+  });
+  ipcMain.handle("zero-token:restart", (_event, rawConfig: unknown) => {
+    const config = rawConfig && typeof rawConfig === "object" ? normalizeZeroTokenSettings(rawConfig) : petSettings.zeroToken;
+    zeroTokenRuntime.dispose();
+    return zeroTokenRuntime.initialize().then(() => zeroTokenRuntime.getStatus(config.provider)).then(statusFromEmbedded);
+  });
+  ipcMain.handle("zero-token:health", (_event, rawConfig: unknown) => {
+    const config = rawConfig && typeof rawConfig === "object" ? normalizeZeroTokenSettings(rawConfig) : petSettings.zeroToken;
+    return zeroTokenRuntime.getStatus(config.provider).then(statusFromEmbedded).then((status) => status.runtimeProvider);
+  });
+  ipcMain.handle("zero-token:check-login", (_event, rawConfig: unknown) => {
+    const config = rawConfig && typeof rawConfig === "object" ? normalizeZeroTokenSettings(rawConfig) : petSettings.zeroToken;
+    return zeroTokenRuntime.getStatus(config.provider).then(statusFromEmbedded).then((status) => status.runtimeProvider);
+  });
+  ipcMain.handle("zero-token:login-runtime", (_event, rawConfig: unknown, rawProviderId: unknown) => {
+    const config = rawConfig && typeof rawConfig === "object" ? normalizeZeroTokenSettings(rawConfig) : petSettings.zeroToken;
+    const providerId = normalizeZeroTokenProvider(rawProviderId, config.provider);
+    return zeroTokenRuntime.login(providerId).then(statusFromEmbedded);
+  });
+  ipcMain.handle("zero-token:logout-runtime", (_event, rawConfig: unknown, rawProviderId: unknown) => {
+    const config = rawConfig && typeof rawConfig === "object" ? normalizeZeroTokenSettings(rawConfig) : petSettings.zeroToken;
+    const providerId = normalizeZeroTokenProvider(rawProviderId, config.provider);
+    return zeroTokenRuntime.logout(providerId).then(statusFromEmbedded);
+  });
+  ipcMain.handle("zero-token:logs", () => []);
+  ipcMain.handle("zero-token:refresh-models", async (_event, rawConfig: unknown) => {
+    const config = rawConfig && typeof rawConfig === "object" ? normalizeZeroTokenSettings(rawConfig) : petSettings.zeroToken;
+    return statusFromEmbedded(await zeroTokenRuntime.getStatus(config.provider));
+  });
+  ipcMain.handle("zero-token:providers", () => {
+    return Promise.all(zeroTokenRuntime.getAvailableProviders().map(async (provider) => ({
+      id: provider.id,
+      name: provider.name,
+      website: provider.loginUrl,
+      authenticated: (await zeroTokenRuntime.getStatus(provider.id)).status === "ready",
+      modelCount: 0,
+    })));
   });
   ipcMain.handle("zero-token:models", (_event, rawConfig: unknown) => {
-    const config = rawConfig && typeof rawConfig === "object"
-      ? normalizeZeroTokenSettings(rawConfig)
-      : petSettings.zeroToken;
-    return webModelRuntimeManager.getModels(config);
+    void rawConfig;
+    return [];
   });
   ipcMain.handle("zero-token:login", (_event, rawConfig: unknown, rawProviderId: unknown) => {
     const config = rawConfig && typeof rawConfig === "object"
       ? normalizeZeroTokenSettings(rawConfig)
       : petSettings.zeroToken;
-    const providerId = typeof rawProviderId === "string" ? rawProviderId.trim() : "";
-    if (!providerId) throw new Error("ZERO_TOKEN_LOGIN_REQUIRED: providerId is required");
-    return webModelRuntimeManager.loginProvider(config, providerId);
+    const providerId = normalizeZeroTokenProvider(rawProviderId, config.provider);
+    return zeroTokenRuntime.login(providerId).then(statusFromEmbedded);
   });
   ipcMain.handle("zero-token:logout", (_event, rawConfig: unknown, rawProviderId: unknown) => {
     const config = rawConfig && typeof rawConfig === "object"
       ? normalizeZeroTokenSettings(rawConfig)
       : petSettings.zeroToken;
-    const providerId = typeof rawProviderId === "string" ? rawProviderId.trim() : "";
-    if (!providerId) throw new Error("ZERO_TOKEN_UNKNOWN_ERROR: providerId is required");
-    return webModelRuntimeManager.logoutProvider(config, providerId);
+    const providerId = normalizeZeroTokenProvider(rawProviderId, config.provider);
+    return zeroTokenRuntime.logout(providerId).then(statusFromEmbedded);
+  });
+  ipcMain.handle("zero-token:open-login-window", (_event, rawConfig: unknown, rawProviderId: unknown) => {
+    const config = rawConfig && typeof rawConfig === "object"
+      ? normalizeZeroTokenSettings(rawConfig)
+      : petSettings.zeroToken;
+    const providerId = normalizeZeroTokenProvider(rawProviderId, config.provider);
+    return zeroTokenRuntime.initialize().then(() => statusFromEmbedded(zeroTokenRuntime.openLoginWindow(providerId)));
   });
   ipcMain.handle("zero-token:open-dashboard", async (_event, rawConfig: unknown) => {
     const config = rawConfig && typeof rawConfig === "object"
       ? normalizeZeroTokenSettings(rawConfig)
       : petSettings.zeroToken;
-    try {
-      const dashboardUrl = config.enabled
-        ? await webModelRuntimeManager.openDashboard(config)
-        : `http://127.0.0.1:${new URL(config.baseUrl).port || 3456}/`;
-      const url = new URL(dashboardUrl);
-      if (url.protocol !== "http:" && url.protocol !== "https:") return { ok: false, detail: "WebModel 地址必须使用 HTTP 或 HTTPS" };
-      if (!(url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]")) {
-        return { ok: false, detail: "为保护本机数据，只允许打开本机 WebModel 控制台" };
-      }
-      await shell.openExternal(url.toString());
-      return { ok: true, detail: "已打开 WebModel 控制台" };
-    } catch {
-      return { ok: false, detail: "WebModel 控制台地址无效" };
-    }
+    return zeroTokenRuntime.initialize().then(() => {
+      zeroTokenRuntime.openLoginWindow(config.provider);
+      return { ok: true, detail: `已打开 ${config.provider} 登录窗口` };
+    });
   });
   ipcMain.handle("ccswitch:sync", (_event, rawSourceIds: unknown): CcSwitchImportResult => {
     const sourceIds = Array.isArray(rawSourceIds)
@@ -4074,6 +4183,7 @@ app.whenReady().then(async () => {
   });
   ipcMain.on("pet:drag-start", (event) => {
     if (!mainWindow || event.sender !== mainWindow.webContents) return;
+    userHasInteractedWithPetWindow = true;
     const [windowX, windowY] = mainWindow.getPosition();
     const cursor = screen.getCursorScreenPoint();
     const desktop = getVirtualDesktopBounds();
@@ -4522,11 +4632,12 @@ app.whenReady().then(async () => {
       codexSandboxMode: isCodexSandboxMode(update.codexSandboxMode) ? update.codexSandboxMode : undefined,
     });
     if (nextSettings.zeroToken.enabled) {
-      void webModelRuntimeManager.ensureRunning(nextSettings.zeroToken).catch((error) => {
+      void zeroTokenRuntime.initialize().then(() => broadcastZeroTokenRuntime()).catch((error) => {
         console.error(`[ZeroToken] ${error instanceof Error ? error.message : String(error)}`);
       });
     } else {
-      void webModelRuntimeManager.stop();
+      zeroTokenRuntime.dispose();
+      broadcastZeroTokenRuntime();
     }
     return nextSettings;
   });
@@ -4745,6 +4856,7 @@ app.whenReady().then(async () => {
             query,
             ownerId: channelMemoryOwnerId("wechat", settings.wechatTokenFile || "active-account", userId),
             workspaceId: runtimeConfig.agentWorkspace,
+            workspacePath: runtimeConfig.agentWorkspace,
             projectScope: memoryProjectScope(runtimeConfig.agentWorkspace),
             agentScope: `agent:${agent.id}`,
             limit: 6,
@@ -5092,10 +5204,15 @@ app.whenReady().then(async () => {
   createWindow();
   createTray();
   if (petSettings.zeroToken.enabled) {
-    void webModelRuntimeManager.ensureRunning(petSettings.zeroToken).catch((error) => {
+    void zeroTokenRuntime.initialize().then(() => broadcastZeroTokenRuntime()).catch((error) => {
       console.error(`[ZeroToken] startup: ${error instanceof Error ? error.message : String(error)}`);
     });
   }
+  void zeroTokenApiServer.start().then((address) => {
+    console.info(`[ZeroToken API] listening on ${address.baseURL}`);
+  }).catch((error) => {
+    console.error(`[ZeroToken API] failed to start: ${error instanceof Error ? error.message : String(error)}`);
+  });
 });
 
 app.on("before-quit", (event) => {

@@ -14,8 +14,9 @@ import type { MemoryRebuildResult } from "./memory/memoryTypes";
 import type { DesktopCaptureDisplay } from "./media/DesktopCaptureService";
 import type { AgentWindowFollowStatus } from "./media/AgentWindowTracker";
 import type { AgentEvent } from "./events/EventTypes";
-import type { WebModelProvider, WebModelModel, WebModelRuntimeState } from "./agents/WebModelRuntimeTypes";
+import type { WebModelProvider, WebModelModel } from "./agents/WebModelRuntimeTypes";
 import type { ZeroTokenProviderStatus } from "./agents/ZeroTokenProvider";
+import type { RuntimeLogEntry, RuntimeProvider } from "./runtime/types";
 
 interface WindowShapeRect {
   x: number;
@@ -106,11 +107,22 @@ contextBridge.exposeInMainWorld("penguinPet", {
   zeroToken: {
     check: (config: PetSettings["zeroToken"]) => ipcRenderer.invoke("zero-token:check", config) as Promise<ZeroTokenProviderStatus>,
     runtime: () => ipcRenderer.invoke("zero-token:runtime") as Promise<ZeroTokenProviderStatus>,
+    status: (providerId?: string) => ipcRenderer.invoke("zero-token:status", providerId ?? "") as Promise<ZeroTokenProviderStatus>,
+    start: (config: PetSettings["zeroToken"]) => ipcRenderer.invoke("zero-token:start", config) as Promise<ZeroTokenProviderStatus>,
+    stop: () => ipcRenderer.invoke("zero-token:stop") as Promise<ZeroTokenProviderStatus>,
+    restart: (config: PetSettings["zeroToken"]) => ipcRenderer.invoke("zero-token:restart", config) as Promise<ZeroTokenProviderStatus>,
+    healthCheck: (config: PetSettings["zeroToken"]) => ipcRenderer.invoke("zero-token:health", config) as Promise<RuntimeProvider>,
+    checkLogin: (config: PetSettings["zeroToken"]) => ipcRenderer.invoke("zero-token:check-login", config) as Promise<RuntimeProvider>,
+    login: (config: PetSettings["zeroToken"], providerId?: string) => ipcRenderer.invoke("zero-token:login-runtime", config, providerId ?? "") as Promise<ZeroTokenProviderStatus>,
+    logout: (config: PetSettings["zeroToken"], providerId?: string) => ipcRenderer.invoke("zero-token:logout-runtime", config, providerId ?? "") as Promise<ZeroTokenProviderStatus>,
+    logs: () => ipcRenderer.invoke("zero-token:logs") as Promise<RuntimeLogEntry[]>,
+    refreshModels: (config: PetSettings["zeroToken"]) => ipcRenderer.invoke("zero-token:refresh-models", config) as Promise<ZeroTokenProviderStatus>,
     providers: (config: PetSettings["zeroToken"]) => ipcRenderer.invoke("zero-token:providers", config) as Promise<WebModelProvider[]>,
     models: (config: PetSettings["zeroToken"]) => ipcRenderer.invoke("zero-token:models", config) as Promise<WebModelModel[]>,
-    loginProvider: (config: PetSettings["zeroToken"], providerId: string) => ipcRenderer.invoke("zero-token:login", config, providerId) as Promise<WebModelRuntimeState>,
-    logoutProvider: (config: PetSettings["zeroToken"], providerId: string) => ipcRenderer.invoke("zero-token:logout", config, providerId) as Promise<WebModelRuntimeState>,
+    loginProvider: (config: PetSettings["zeroToken"], providerId: string) => ipcRenderer.invoke("zero-token:login", config, providerId) as Promise<ZeroTokenProviderStatus>,
+    logoutProvider: (config: PetSettings["zeroToken"], providerId: string) => ipcRenderer.invoke("zero-token:logout", config, providerId) as Promise<ZeroTokenProviderStatus>,
     openDashboard: (config: PetSettings["zeroToken"]) => ipcRenderer.invoke("zero-token:open-dashboard", config),
+    openLoginWindow: (config: PetSettings["zeroToken"], providerId?: string) => ipcRenderer.invoke("zero-token:open-login-window", config, providerId ?? "") as Promise<ZeroTokenProviderStatus>,
     subscribe: (listener: (status: ZeroTokenProviderStatus) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, status: ZeroTokenProviderStatus) => listener(status);
       ipcRenderer.on("zero-token:runtime", handler);
