@@ -8,6 +8,8 @@ export type AgentSourceApp = "claude-code" | "claude-desktop" | "codex" | "gemin
 export type AgentSyncState = "synced" | "stale" | "conflict" | "unavailable";
 export type AgentExecutionSupport = "supported" | "metadata-only" | "needs-login";
 export type AgentModelOptionSource = "cc-switch-current" | "cc-switch-catalog" | "local-config" | "manual";
+/** Model transport selected for an Agent; this is independent from Agent identity/provider. */
+export type AgentModelProvider = "api" | "ccs" | "deepseek" | "zerotoken";
 
 export interface AgentCapabilities {
   externalRuntime: boolean;
@@ -105,12 +107,17 @@ export interface AgentConfig {
   modelIconKey?: string | null;
   modelOptions?: AgentModelOption[];
   selectedModelId?: string | null;
+  modelProvider?: AgentModelProvider;
   syncState?: AgentSyncState;
   executionSupport?: AgentExecutionSupport;
   capabilities?: AgentCapabilities;
   ccSwitchCurrentConfig?: CcSwitchCurrentConfig;
   ccSwitchApiProfiles?: CcSwitchApiProfile[];
   selectedCcSwitchApiProfileId?: string | null;
+}
+
+export function normalizeAgentModelProvider(value: unknown): AgentModelProvider | undefined {
+  return value === "api" || value === "ccs" || value === "deepseek" || value === "zerotoken" ? value : undefined;
 }
 
 /** Only Agents explicitly kept in the local Agent directory are selectable by bots. */
@@ -620,6 +627,7 @@ export function normalizeAgentConfigs(value: unknown): AgentConfig[] {
       modelIconKey: typeof raw.modelIconKey === "string" ? raw.modelIconKey.trim().slice(0, 40) : null,
       modelOptions: normalizedModelOptions,
       selectedModelId: normalizedSelectedModelId,
+      modelProvider: normalizeAgentModelProvider(raw.modelProvider),
       syncState: normalizeSyncState(raw.syncState),
       executionSupport,
       capabilities: normalizeAgentCapabilities(raw.capabilities, provider),
