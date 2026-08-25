@@ -1,13 +1,12 @@
 import "./settings.css";
 import { AGENT_CAPABILITY_IDS, AGENT_CAPABILITY_LABELS, agentSupportsZeroToken, defaultAgentCapabilityPolicy, defaultAgentConfigs, fullAgentCapabilityPolicy, isAgentAdded } from "../agents/types";
 import { agentModelOptionId } from "../agents/types";
-import type { AgentCapability, AgentCapabilityPermission, AgentConfig, AgentHealthCheckResult, AgentModelOption, AgentTestResult, LocalAgentInfo } from "../agents/types";
+import type { AgentCapability, AgentCapabilityPermission, AgentConfig, AgentHealthCheckResult, AgentModelOption, AgentModelProvider, AgentTestResult, LocalAgentInfo } from "../agents/types";
 import type { CcSwitchStatus, UpdateCheckResult } from "../main/systemTypes";
 import type { PenguinPetApi } from "./types";
 import type { AgentProvider, LocalDataSummary, PetPerceptionSettings, PetSettings, PetStatusLightMotion, PetStyle, PetTheme, TaskNotificationMode, ZeroTokenSettings } from "../settings/types";
 import type { AgentTaskActivity, AgentTaskSnapshot, AgentTaskSurface, PetPerceptionEvent, PetPerceptionSnapshot } from "../main/pet/perceptionTypes";
 import type { MemoryEntry } from "../main/agents/orchestrationTypes";
-import type { MemorySummary } from "../main/memory/MemoryStore";
 import type { PetState } from "../pet/PetStateMachine";
 import type { ChannelStatus } from "../main/channels/types";
 import type { QQQrLoginEvent } from "../main/channels/qqQrLogin";
@@ -17,7 +16,8 @@ import { renderAgentBrandIcon } from "./agentBrandIcons";
 import { zeroTokenModelLabel } from "../main/agents/ZeroTokenModel";
 import type { ZeroTokenProviderStatus } from "../main/agents/ZeroTokenProvider";
 
-type SettingsPage = "home" | "bots" | "agents" | "agent-add" | "agent-detail" | "pet-styles" | "perception" | "memory" | "diagnostics" | "data" | "about" | "wechat" | "qq" | "feishu" | "dingtalk";
+type SettingsPage = "home" | "appearance" | "personalization" | "bots" | "agents" | "agent-add" | "agent-detail" | "pet-styles" | "perception" | "perception-detail" | "perception-advanced" | "memory" | "memory-all" | "diagnostics" | "data" | "about" | "wechat" | "qq" | "feishu" | "dingtalk";
+type PerceptionDetail = "companion" | "interaction" | "task-feedback" | "position" | "movement" | "status-light";
 
 const api = (window as Window & { penguinPet: PenguinPetApi }).penguinPet;
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -34,12 +34,12 @@ app.innerHTML = `
       <div class="settings-deco settings-deco--one">✦</div>
       <div class="settings-deco settings-deco--two">♡</div>
       <header class="settings-header" title="拖动这里移动设置窗口">
-        <button id="settings-back" class="settings-back" type="button" aria-label="返回设置主页" title="返回设置主页"><span aria-hidden="true">‹</span></button>
+        <button id="settings-back" class="settings-back" type="button" aria-label="返回设置主页" title="返回设置主页"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M19 12H5M11 6l-6 6 6 6"/></svg></button>
         <div class="settings-mascot" aria-hidden="true">
           <video id="settings-mascot-source" class="settings-mascot__source" src="${mascotVideoUrl}" autoplay loop muted playsinline></video>
           <canvas class="settings-mascot__video" width="240" height="240"></canvas>
         </div>
-        <button id="settings-close" class="settings-close" type="button" aria-label="关闭设置">×</button>
+        <button id="settings-close" class="settings-close" type="button" aria-label="关闭设置"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
       </header>
       <div id="settings-content" class="settings-content"></div>
       <p class="settings-version" id="settings-version"></p>
@@ -129,21 +129,49 @@ function clearConnectedBlackBackground(context: CanvasRenderingContext2D): void 
   context.putImageData(image, 0, 0);
 }
 
+let perceptionMascotCanvas: HTMLCanvasElement | null = null;
+let perceptionMascotContext: CanvasRenderingContext2D | null = null;
+let mascotAssetRequestId = 0;
+
+function drawMascotPreview(canvas: HTMLCanvasElement, context: CanvasRenderingContext2D): void {
+  if (mascotVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || mascotVideo.videoWidth <= 0) return;
+  const canvasSize = canvas.width;
+  const sourceWidth = mascotVideo.videoWidth;
+  const sourceHeight = mascotVideo.videoHeight;
+  const scale = Math.max(canvasSize / sourceWidth, canvasSize / sourceHeight);
+  const drawWidth = Math.round(sourceWidth * scale);
+  const drawHeight = Math.round(sourceHeight * scale);
+  const drawX = Math.round((canvasSize - drawWidth) / 2);
+  const drawY = Math.round((canvasSize - drawHeight) / 2);
+  context.clearRect(0, 0, canvasSize, canvasSize);
+  context.drawImage(mascotVideo, drawX, drawY, drawWidth, drawHeight);
+  clearConnectedBlackBackground(context);
+}
+
 function renderMascotPreview(): void {
-  if (mascotVideo.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && mascotVideo.videoWidth > 0) {
-    const canvasSize = mascotPreviewCanvas.width;
-    const sourceWidth = mascotVideo.videoWidth;
-    const sourceHeight = mascotVideo.videoHeight;
-    const scale = Math.max(canvasSize / sourceWidth, canvasSize / sourceHeight);
-    const drawWidth = Math.round(sourceWidth * scale);
-    const drawHeight = Math.round(sourceHeight * scale);
-    const drawX = Math.round((canvasSize - drawWidth) / 2);
-    const drawY = Math.round((canvasSize - drawHeight) / 2);
-    mascotPreviewContext.clearRect(0, 0, canvasSize, canvasSize);
-    mascotPreviewContext.drawImage(mascotVideo, drawX, drawY, drawWidth, drawHeight);
-    clearConnectedBlackBackground(mascotPreviewContext);
+  drawMascotPreview(mascotPreviewCanvas, mascotPreviewContext);
+  if (!perceptionMascotCanvas?.isConnected) {
+    perceptionMascotCanvas = document.querySelector<HTMLCanvasElement>("#perception-mascot-canvas");
+    perceptionMascotContext = perceptionMascotCanvas?.getContext("2d", { willReadFrequently: true }) ?? null;
   }
+  if (perceptionMascotCanvas && perceptionMascotContext) drawMascotPreview(perceptionMascotCanvas, perceptionMascotContext);
   window.requestAnimationFrame(renderMascotPreview);
+}
+
+async function syncMascotAsset(settings: PetSettings): Promise<void> {
+  const requestId = ++mascotAssetRequestId;
+  try {
+    const assets = await api.petStyles.assets(settings.activePetStyleId);
+    if (requestId !== mascotAssetRequestId) return;
+    const idleAsset = assets.assets.idle;
+    if (!idleAsset || mascotVideo.getAttribute("src") === idleAsset) return;
+    mascotVideo.pause();
+    mascotVideo.src = idleAsset;
+    mascotVideo.load();
+    void mascotVideo.play().catch(() => undefined);
+  } catch (error) {
+    console.warn("Unable to load the active pet preview asset.", error);
+  }
 }
 
 void mascotVideo.play().catch(() => undefined);
@@ -235,6 +263,7 @@ function showConfirm(title: string, body: string, options?: { confirmLabel?: str
 }
 
 let currentPage: SettingsPage = "home";
+let perceptionDetail: PerceptionDetail = "companion";
 let renderedPage: SettingsPage | null = null;
 let themeTransitionSequence = 0;
 let customSelectSequence = 0;
@@ -242,6 +271,8 @@ let persistedSettings: PetSettings | null = null;
 let draftSettings: PetSettings | null = null;
 let dirty = false;
 let saving = false;
+let perceptionAutoSaveTimer: number | null = null;
+let perceptionAutoSaveError = false;
 let closing = false;
 let agentDiscovery: LocalAgentInfo[] = [];
 let discoveringAgents = false;
@@ -283,7 +314,6 @@ let dataSummaryMessage = "";
 let clearingChatHistory = false;
 let exportingDataSummary = false;
 let deletingManagedData = false;
-let memorySummary: MemorySummary | null = null;
 let memoryEntries: MemoryEntry[] = [];
 let memoryLoading = false;
 let memoryOrganizing = false;
@@ -342,6 +372,27 @@ let feishuQrLoginState: FeishuQrLoginEvent | null = null;
 let advancedWeChatOpen = false;
 const revealedWeChatIds = new Set<string>();
 const FIRST_USE_GUIDE_KEY = "penguin.wechat.first-use-guide.v1";
+const PERSONALIZATION_REPLY_STYLE_KEY = "penguin.personalization.reply-style.v1";
+const PERSONALIZATION_AUTO_MEMORY_KEY = "penguin.personalization.auto-memory.v1";
+type ReplyStyle = "balanced" | "concise" | "warm" | "detailed";
+const REPLY_STYLE_LABELS: Record<ReplyStyle, string> = {
+  balanced: "温柔",
+  concise: "简洁",
+  warm: "温柔",
+  detailed: "详细",
+};
+
+function readReplyStyle(): ReplyStyle {
+  const value = localStorage.getItem(PERSONALIZATION_REPLY_STYLE_KEY);
+  return value === "balanced" || value === "concise" || value === "warm" || value === "detailed" ? value : "balanced";
+}
+
+function readAutoMemoryEnabled(): boolean {
+  return localStorage.getItem(PERSONALIZATION_AUTO_MEMORY_KEY) !== "off";
+}
+
+let replyStyle: ReplyStyle = readReplyStyle();
+let autoMemoryEnabled = readAutoMemoryEnabled();
 
 function applyTheme(theme: PetTheme, animate = false): void {
   const root = document.documentElement;
@@ -520,8 +571,8 @@ function agentExecutionLabel(config: AgentConfig): string {
 }
 
 function agentCardMeta(config: AgentConfig, settings: PetSettings | null = draftSettings): string {
-  if (settings?.zeroToken.enabled && agentSupportsZeroToken(config)) {
-    return `🟦 Zero Token · ${zeroTokenModelLabel(zeroTokenStatus?.model || settings.zeroToken.model)}`;
+  if (config.modelProvider === "zerotoken" || (settings?.zeroToken.enabled && !config.modelProvider && agentSupportsZeroToken(config))) {
+    return `🟦 Zero Token · ${zeroTokenModelLabel(zeroTokenStatus?.model || settings?.zeroToken.model || "")}`;
   }
   const current = config.ccSwitchCurrentConfig;
   if (current) {
@@ -593,38 +644,6 @@ function escapeHtml(value: string): string {
     '"': "&quot;",
     "'": "&#39;",
   })[character] ?? character);
-}
-
-function memoryKindLabel(kind: MemoryEntry["kind"]): string {
-  if (kind === "preference") return "偏好";
-  if (kind === "rule") return "规则";
-  if (kind === "experience") return "经验";
-  return "事实";
-}
-
-function memoryScopeLabel(scope: MemoryEntry["scope"]): string {
-  if (scope === "user") return "用户画像";
-  if (scope === "workspace") return "工作区";
-  if (scope === "session") return "会话";
-  return "桌宠记忆";
-}
-
-function memorySourceLabel(source: MemoryEntry["source"]): string {
-  if (source === "explicit-user") return "你明确要求记住";
-  if (source === "learning-candidate") return "自动整理 · 待审核";
-  if (source === "approved-learning") return "自动整理 · 已确认";
-  if (source === "agent") return "主 Agent 整理";
-  return "桌宠整理";
-}
-
-function memoryUpdatedLabel(updatedAt: string): string {
-  const timestamp = Date.parse(updatedAt);
-  if (!Number.isFinite(timestamp)) return "时间未知";
-  const elapsed = Math.max(0, Date.now() - timestamp);
-  if (elapsed < 60_000) return "刚刚更新";
-  if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)} 分钟前更新`;
-  if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)} 小时前更新`;
-  return `${new Date(timestamp).toLocaleDateString()} 更新`;
 }
 
 function wechatStateLabel(state: WeChatConnectionState): string {
@@ -971,6 +990,164 @@ function updateAgentCardListView(): void {
   }
 }
 
+type SettingCardIconColor = "purple" | "blue" | "green" | "orange" | "yellow" | "gray";
+type IconBadgeName =
+  | "sparkle"
+  | "chat"
+  | "task"
+  | "app-status"
+  | "personalization"
+  | "bots"
+  | "agent"
+  | "memory"
+  | "pet-perception"
+  | "bell"
+  | "target"
+  | "interaction"
+  | "feedback"
+  | "location"
+  | "move"
+  | "status-light"
+  | "advanced"
+  | "eye"
+  | "filter"
+  | "sensitive"
+  | "frequency"
+  | "event"
+  | "quiet"
+  | "rule"
+  | "content"
+  | "display"
+  | "tip"
+  | "diagnostics"
+  | "privacy"
+  | "info"
+  | "pet-style"
+  | "memory-all"
+  | "wechat"
+  | "qq"
+  | "feishu"
+  | "dingtalk";
+
+interface SettingCardProps {
+  id: string;
+  icon: IconBadgeName;
+  iconColor: SettingCardIconColor;
+  title: string;
+  description: string;
+  badge?: string;
+  /** Delegated action key; the renderer keeps handlers out of inline markup. */
+  onClick?: string;
+  className?: string;
+  ariaLabel?: string;
+}
+
+function renderIconBadge(icon: IconBadgeName, color: SettingCardIconColor): string {
+  const paths: Record<IconBadgeName, string> = {
+    sparkle: '<path d="M12 2.5 14 8l5.5 2-5.5 2-2 5.5-2-5.5-5.5-2L10 8l2-5.5Z"/><path d="m19 15 .8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15Z"/>',
+    chat: '<path d="M5 6.5h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-7l-4 3v-3H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z"/><path d="M8 12h.01M12 12h.01M16 12h.01"/>',
+    task: '<rect x="5" y="3.5" width="14" height="17" rx="2"/><path d="M8.5 8.5h7M8.5 12h7M8.5 15.5h4"/><path d="m8.2 6.2.8.8 1.6-1.7"/>',
+    "app-status": '<rect x="3.5" y="5" width="17" height="13" rx="2"/><path d="M8 21h8M12 18v3M7 9h10M7 12.5h.01M10 12.5h.01"/>',
+    personalization: '<circle cx="12" cy="8" r="3.2"/><path d="M5.5 20c.8-3.3 3-5 6.5-5s5.7 1.7 6.5 5"/>',
+    bots: '<path d="M7 17.5h7.5l3.5 2v-2h1a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2Z"/><path d="M8.5 11h.01M12 11h.01M15.5 11h.01"/>',
+    agent: '<path d="M8.5 9.5a3.5 3.5 0 1 0 0 7h1.2V20h4.6v-3.5h1.2a3.5 3.5 0 1 0 0-7h-1.2V6.2a2.3 2.3 0 0 0-4.6 0v3.3H8.5Z"/><path d="M9 12h6M12 9v6"/>',
+    memory: '<path d="M8.5 8.5A3.5 3.5 0 0 0 7 15.2 3.5 3.5 0 0 0 10.5 19h1.5V7.5a3 3 0 0 0-3.5 1Z"/><path d="M15.5 8.5A3.5 3.5 0 0 1 17 15.2a3.5 3.5 0 0 1-3.5 3.8H12V7.5a3 3 0 0 1 3.5 1Z"/><path d="M9 12h1.5M14.5 12H13M9.5 15h1M14.5 15H14"/>',
+    "pet-perception": '<path d="M3 12h3l2-6 4 12 2-6h7"/>',
+    bell: '<path d="M6 17h12l-1.5-2v-4a4.5 4.5 0 0 0-9 0v4L6 17Z"/><path d="M10 20h4"/>',
+    target: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1"/>',
+    interaction: '<path d="M5 6.5h14a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-6l-4 3v-3H5a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2Z"/><path d="M8 11.5h8"/>',
+    feedback: '<path d="M5 4.5h14v15H5z"/><path d="M8.5 8h7M8.5 11.5h7M8.5 15h4"/><path d="m16 4.5 1.5-2 1.5 2"/>',
+    location: '<path d="M12 21s6-5.5 6-11a6 6 0 1 0-12 0c0 5.5 6 11 6 11Z"/><circle cx="12" cy="10" r="2"/>',
+    move: '<path d="M12 3v18M3 12h18"/><path d="m8 7 4-4 4 4M8 17l4 4 4-4M7 8l-4 4 4 4M17 8l4 4-4 4"/>',
+    "status-light": '<path d="M9 17h6M10 20h4"/><path d="M8 14.5a6 6 0 1 1 8 0c-.8.7-1 1.3-1 2.5H9c0-1.2-.2-1.8-1-2.5Z"/><path d="M12 2v2M4.9 4.9l1.4 1.4M19.1 4.9l-1.4 1.4"/>',
+    advanced: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-1.8 1.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-2.6V20a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1-1.8-1.8.1-.1A1.7 1.7 0 0 0 8 15a1.7 1.7 0 0 0-1.6-1H6v-2.6h.4A1.7 1.7 0 0 0 8 10a1.7 1.7 0 0 0-.3-1.9l-.1-.1 1.8-1.8.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.6v-.2H15V5a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1 1.8 1.8-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2V14h-.2a1.7 1.7 0 0 0-1.6 1Z"/>',
+    eye: '<path d="M2.5 12s3.3-5 9.5-5 9.5 5 9.5 5-3.3 5-9.5 5-9.5-5-9.5-5Z"/><circle cx="12" cy="12" r="2.5"/>',
+    filter: '<path d="M4 5h16l-6 7v5l-4 2v-7L4 5Z"/>',
+    sensitive: '<path d="M12 3 20 7v5c0 4.5-3.1 7.8-8 9-4.9-1.2-8-4.5-8-9V7l8-4Z"/><path d="M9.5 12h5M12 9.5v5"/>',
+    frequency: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3 2"/>',
+    event: '<path d="M6 4.5h12v15H6z"/><path d="M9 8.5h6M9 12h6M9 15.5h3"/><path d="m16 4.5 1-2 1 2"/>',
+    quiet: '<path d="M5 10h3l4-3v10l-4-3H5z"/><path d="m17 9 4 6M21 9l-4 6"/>',
+    rule: '<path d="M6 4.5h12v15H6z"/><path d="M9 8h6M9 12h6M9 16h4"/><path d="m9 4.5 1-2h4l1 2"/>',
+    content: '<path d="M5 4.5h14v15H5z"/><path d="M8.5 8h7M8.5 11.5h7M8.5 15h4"/>',
+    display: '<rect x="3.5" y="5" width="17" height="13" rx="2"/><path d="M8 21h8M12 18v3"/><path d="M8 9.5h8M8 13h5"/>',
+    tip: '<path d="M8 15.5a6 6 0 1 1 8 0c-.8.7-1 1.3-1 2.5H9c0-1.2-.2-1.8-1-2.5Z"/><path d="M10 21h4M12 2v1"/>',
+    diagnostics: '<path d="M6 4h12v16H6z"/><path d="M9 8h6M9 12h3M9 16h6"/><circle cx="16" cy="16" r="1.5"/>',
+    privacy: '<path d="m12 3 7 3v5c0 4.5-2.8 8-7 10-4.2-2-7-5.5-7-10V6l7-3Z"/><path d="m9 12 2 2 4-4"/>',
+    info: '<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8h.01"/>',
+    "pet-style": '<path d="M12 3.5 14 9l5.5 2-5.5 2-2 5.5-2-5.5-5.5-2 5.5-2 2-5.5Z"/>',
+    "memory-all": '<path d="M6 5.5h10a2 2 0 0 1 2 2V19H8a2 2 0 0 1-2-2V5.5Z"/><path d="M6 7.5h-1a2 2 0 0 0-2 2V19h12M9 10h6M9 13h6"/>',
+    wechat: '<path d="M6.5 17.5c-2 0-3.5-1.3-3.5-3s1.5-3 3.5-3c.3 0 .6 0 .9.1C7.8 9.2 10.1 7.5 13 7.5c3.3 0 6 2.1 6 4.8 0 1.2-.5 2.3-1.4 3.2l.6 2-2.2-1a7 7 0 0 1-3 .6c-1 0-2-.2-2.8-.6-.9.6-2.1 1-3.7 1Z"/><path d="M9 12h.01M13 12h.01M16 14h.01"/>',
+    qq: '<path d="M6 15.5c-1.3 1.7-1.2 3.1-.5 3.1.5 0 1.1-.4 1.6-1 1.3 1.1 2.9 1.7 4.9 1.7s3.6-.6 4.9-1.7c.5.6 1.1 1 1.6 1 .7 0 .8-1.4-.5-3.1.2-.6.3-1.3.3-2C18.3 9.9 15.5 7 12 7s-6.3 2.9-6.3 6.5c0 .7.1 1.4.3 2Z"/><path d="M9 12h.01M15 12h.01"/>',
+    feishu: '<path d="m12 3 2.1 6.1L20 11l-5.9 1.9L12 19l-2.1-6.1L4 11l5.9-1.9L12 3Z"/><path d="m18.5 15 .6 1.5 1.4.5-1.4.5-.6 1.5-.6-1.5-1.4-.5 1.4-.5.6-1.5Z"/>',
+    dingtalk: '<path d="M5 6.5c2.4 1.3 4.7 2 7 2 1.7 0 3.3-.3 4.7-.9-1.1 2.4-2.7 4.2-4.7 5.4v3.5"/><path d="M8 18.5h5M10 15.5h4"/>'
+  };
+  return `<span class="icon-badge icon-badge--${color}" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[icon]}</svg></span>`;
+}
+
+/**
+ * The navigation primitive for the settings surface. Keeping the markup in
+ * one place makes the home page, bot channels, and secondary settings pages
+ * feel like one product instead of a collection of legacy lists.
+ */
+function renderSettingCardCompact(props: SettingCardProps): string {
+  const className = ["setting-card-compact", "setting-card", props.className].filter(Boolean).join(" ");
+  const actionKey = props.onClick ?? props.id;
+  return `
+    <button id="${escapeHtml(props.id)}" data-setting-action="${escapeHtml(actionKey)}" class="${className}" type="button"${props.ariaLabel ? ` aria-label="${escapeHtml(props.ariaLabel)}"` : ""}>
+      ${renderIconBadge(props.icon, props.iconColor)}
+      <span class="setting-card__copy"><strong>${escapeHtml(props.title)}</strong><small>${escapeHtml(props.description)}</small></span>
+      ${props.badge ? `<span class="setting-card__badge">${escapeHtml(props.badge)}</span>` : ""}
+      <span class="setting-card__arrow" aria-hidden="true">&rsaquo;</span>
+    </button>
+  `;
+}
+
+interface PerceptionItemProps {
+  icon: IconBadgeName;
+  iconColor: SettingCardIconColor;
+  title: string;
+  description: string;
+  value: string;
+  /** Delegated perception action key; the parent owns route/state changes. */
+  onClick?: string;
+  control?: string;
+}
+
+function renderPerceptionItem(props: PerceptionItemProps): string {
+  const valueMarkup = props.control
+    ? props.control
+    : `<span class="perception-item__value-text">${escapeHtml(props.value)}</span><span class="perception-item__arrow" aria-hidden="true">&rsaquo;</span>`;
+  const tag = props.onClick ? "button" : "div";
+  const attributes = props.onClick
+    ? ` type="button" data-perception-action="${escapeHtml(props.onClick)}" aria-label="${escapeHtml(props.title)}"`
+    : "";
+  return `
+    <${tag} class="perception-item${props.onClick ? " perception-item--interactive" : ""}"${attributes}>
+      ${renderIconBadge(props.icon, props.iconColor)}
+      <span class="perception-item__copy"><strong>${escapeHtml(props.title)}</strong><small>${escapeHtml(props.description)}</small></span>
+      <span class="perception-item__value">${valueMarkup}</span>
+    </${tag}>
+  `;
+}
+
+function renderPerceptionCard(items: PerceptionItemProps[], className = ""): string {
+  return `<section class="perception-card ${className}">${items.map((item) => renderPerceptionItem(item)).join("")}</section>`;
+}
+
+function renderPerceptionCheckStatus(enabled: boolean): string {
+  return `<span class="perception-check-status ${enabled ? "is-enabled" : ""}"><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="m4.5 10.5 3.2 3.2 7.8-8"/></svg><span>${enabled ? "已开启" : "未开启"}</span></span>`;
+}
+
+function renderPerceptionPageHeading(title: string, description: string): string {
+  return `
+    <div class="settings-title-row perception-settings-title">
+      <div><div class="settings-page-kicker">PET PERCEPTION</div><h1>${escapeHtml(title)}</h1></div>
+      <span id="perception-auto-save-state" class="settings-save-state perception-auto-save-state">${saving ? "正在保存…" : "✓ 已自动保存"}</span>
+    </div>
+    <p class="settings-page-intro perception-page-intro">${escapeHtml(description)}</p>
+  `;
+}
+
 function renderThemePicker(theme: PetTheme): string {
   const themes: Array<{ id: PetTheme; name: string }> = [
     { id: "minimal", name: "简约" },
@@ -1012,14 +1189,16 @@ function isPetStyleStateConfigured(style: PetStyle, state: PetState): boolean {
 function renderPetStylePicker(settings: PetSettings): string {
   const style = settings.petStyles.find((item) => item.id === settings.activePetStyleId) ?? settings.petStyles[0];
   const name = style?.name ?? "默认企鹅";
-  const count = style ? petStyleStateCount(style) : 7;
   return [
     '<section id="pet-style-settings" class="pet-style-settings pet-style-settings--summary">',
-    '  <button id="open-pet-style-settings" class="pet-style-summary" type="button">',
-    '    <span class="pet-style-summary__icon" aria-hidden="true">✦</span>',
-    '    <span class="pet-style-summary__copy"><strong>宠物风格</strong><small>' + escapeHtml(name) + ' · ' + count + ' 个状态</small></span>',
-    '    <span class="setting-arrow" aria-hidden="true">&rsaquo;</span>',
-    '  </button>',
+    renderSettingCardCompact({
+      id: "open-pet-style-settings",
+      icon: "pet-style",
+      iconColor: "purple",
+      title: "宠物风格",
+      description: name,
+      className: "setting-card--nested",
+    }),
     '</section>',
   ].join("");
 }
@@ -1537,109 +1716,173 @@ function renderPerceptionTrigger(settings: PetSettings): string {
 
 function renderPetPerceptionPage(settings: PetSettings): string {
   const perception = settings.petPerception;
-  const statusLightMotion = perception.statusLightMotion ?? "static";
-  const feedbackMode = perceptionFeedbackMode(settings);
-  const sourceScope = perceptionSourceScope(settings);
-  const digestMode = perceptionDigestMode(settings);
-  const sourceDisabled = perception.enabled ? "" : "disabled";
   return `
     <div class="settings-page settings-page--perception">
-      <div class="settings-title-row">
-        <div><div class="settings-page-kicker">PET PERCEPTION</div><h1>桌宠感知</h1></div>
-        <span class="settings-save-state ${dirty ? "is-dirty" : ""}">${dirty ? "待保存" : "已保存"}</span>
+      ${renderPerceptionPageHeading("桌宠感知", "让小卡拉米感知环境，主动陪伴你")}
+      ${renderPerceptionStatusCard(settings)}
+      <div class="perception-section-title">互动方式</div>
+      ${renderPerceptionCard([
+        { icon: "bell", iconColor: "purple", title: "主动陪伴", description: "什么时候小卡拉米主动找你", value: "智能推荐", onClick: "companion" },
+        { icon: "target", iconColor: "green", title: "感知内容", description: "小卡拉米可以关注什么内容", value: "聊天 / 任务 / 应用状态", onClick: "advanced" },
+        { icon: "interaction", iconColor: "blue", title: "互动表现", description: "小卡拉米如何回应你", value: "动作 + 气泡", onClick: "interaction" },
+        { icon: "feedback", iconColor: "orange", title: "任务反馈", description: "任务完成后的反馈方式", value: "简要反馈", onClick: "task-feedback" },
+      ], "perception-card--stacked")}
+      <div class="perception-section-title">桌宠表现</div>
+      ${renderPerceptionCard([
+        { icon: "location", iconColor: "orange", title: "位置与停靠", description: "小卡拉米停在哪里", value: "桌面右下角", onClick: "position" },
+        { icon: "move", iconColor: "blue", title: "移动与跟随", description: "是否允许移动和跟随", value: "允许移动", onClick: "movement" },
+        { icon: "status-light", iconColor: "yellow", title: "状态灯", description: "桌宠状态提示方式", value: petStatusLightMotionLabel(perception.statusLightMotion ?? "static"), onClick: "status-light" },
+      ], "perception-card--stacked")}
+      <button id="open-perception-advanced" class="perception-advanced-entry" type="button">
+        ${renderIconBadge("advanced", "purple")}
+        <span class="perception-item__copy"><strong>高级设置</strong><small>自定义更详细的感知规则与提醒方式</small></span>
+        <span class="perception-item__arrow" aria-hidden="true">&rsaquo;</span>
+      </button>
+    </div>
+  `;
+}
+
+function renderPerceptionStatusCard(settings: PetSettings): string {
+  const perception = settings.petPerception;
+  return `
+    <section id="perception-status-card" class="perception-status-card" aria-live="polite">
+      <div class="perception-status-card__main">
+        <div class="perception-status-card__mascot"><canvas id="perception-mascot-canvas" class="perception-mascot" width="240" height="240" aria-label="小卡拉米当前形象"></canvas></div>
+        <div class="perception-status-card__copy">
+          <div class="perception-status-card__title"><span id="perception-state-dot" class="perception-state-dot ${perception.enabled ? "is-on" : ""}"></span><strong id="perception-state-title">${perception.enabled ? "感知已开启" : "感知未开启"}</strong></div>
+          <p id="perception-state-description">${perception.enabled ? "小卡拉米正在了解你的工作状态，\n会在合适的时候主动陪伴你。" : "开启后，小卡拉米会在合适的时候主动陪伴你。"}</p>
+        </div>
+        <label class="perception-status-switch" aria-label="开启桌宠感知">
+          <input data-setting="petPerception" data-perception-setting="enabled" type="checkbox" ${perception.enabled ? "checked" : ""} />
+          <span class="perception-status-switch__track"><span></span></span>
+        </label>
       </div>
-      <section class="perception-hero">
-        <div><strong>感知总开关</strong></div>
-        <span class="cute-switch"><input data-setting="petPerception" data-perception-setting="enabled" type="checkbox" ${perception.enabled ? "checked" : ""} /><span class="cute-switch__track"></span></span>
-      </section>
-      <section class="perception-status" aria-live="polite">
-        <span class="perception-status__dot ${perception.enabled ? "is-on" : ""}"></span>
-        <div><strong>${perception.enabled ? "感知已开启" : "感知未开启"}</strong>${perception.enabled ? `<small>${perceptionAgentSummary()}</small>` : ""}</div>
-      </section>
-      <div class="settings-section-title">核心行为</div>
-      <section class="perception-quick-settings">
-        <div class="perception-quick-card">
-          <div><strong>任务通知</strong><small>按机器人独立配置</small></div>
-          <button id="open-bot-center" class="settings-secondary settings-secondary--compact" type="button">去机器人中心</button>
-        </div>
-        <label class="perception-quick-card perception-quick-card--select">
-          <div><strong>观察范围</strong></div>
-          <select class="agent-select" data-setting="petPerception" data-perception-setting="sourceScope" ${sourceDisabled}>
-            ${Object.entries(PERCEPTION_SOURCE_SCOPE_LABELS).map(([value, label]) => `<option value="${value}" ${sourceScope === value ? "selected" : ""}>${label}</option>`).join("")}
-          </select>
-        </label>
-        <label class="perception-quick-card perception-quick-card--select">
-          <div><strong>桌宠回应</strong></div>
-          <select class="agent-select" data-setting="petPerception" data-perception-setting="feedbackMode" ${sourceDisabled}>
-            <option value="full" ${feedbackMode === "full" ? "selected" : ""}>动作 + 气泡</option>
-            <option value="action" ${feedbackMode === "action" ? "selected" : ""}>仅动作</option>
-            <option value="bubble" ${feedbackMode === "bubble" ? "selected" : ""}>仅气泡</option>
-            <option value="silent" ${feedbackMode === "silent" ? "selected" : ""}>静默</option>
-          </select>
-        </label>
-        <label class="perception-quick-card perception-quick-card--select">
-          <div><strong>中间简报</strong></div>
-          <select class="agent-select" data-setting="petPerception" data-perception-setting="digestMode" ${sourceDisabled}>
-            <option value="off" ${digestMode === "off" ? "selected" : ""}>关闭中间简报</option>
-            <option value="on" ${digestMode === "on" ? "selected" : ""}>允许中间简报</option>
-          </select>
-        </label>
-      </section>
-      <details class="perception-advanced-panel">
-        <summary><span><strong>观察范围高级设置</strong></span><em>高级</em></summary>
-        <section class="settings-list settings-list--compact perception-advanced-panel__body">
-          <label class="setting-row">
-            <span class="setting-copy"><strong>Agent 可用性</strong></span>
-            <span class="cute-switch"><input data-setting="petPerception" data-perception-setting="agentRuntime" type="checkbox" ${perception.agentRuntime ? "checked" : ""} ${sourceDisabled} /><span class="cute-switch__track"></span></span>
-          </label>
-          <label class="setting-row">
-            <span class="setting-copy"><strong>任务状态</strong></span>
-            <span class="cute-switch"><input data-setting="petPerception" data-perception-setting="taskActivity" type="checkbox" ${perception.taskActivity ? "checked" : ""} ${sourceDisabled} /><span class="cute-switch__track"></span></span>
-          </label>
-          <label class="setting-row">
-            <span class="setting-copy"><strong>Bot 在线状态</strong></span>
-            <span class="cute-switch"><input data-setting="petPerception" data-perception-setting="botActivity" type="checkbox" ${perception.botActivity ? "checked" : ""} ${sourceDisabled} /><span class="cute-switch__track"></span></span>
-          </label>
-        </section>
-      </details>
-      <details class="perception-advanced-panel">
-        <summary><span><strong>中间简报高级设置</strong></span><em>高级</em></summary>
-        <section class="settings-list settings-list--compact perception-advanced-panel__body">
-          <div class="perception-lifecycle-row">
-            <div class="setting-copy"><strong>任务生命周期</strong></div>
-            <div class="perception-lifecycle-chips"><span>开始</span><span>完成</span></div>
-          </div>
-          <div class="perception-long-task-reply">
-            <label><span>基础间隔</span><input data-setting="petPerception" data-perception-setting="longTaskReplyIntervalSeconds" type="number" min="15" max="300" step="5" value="${perception.longTaskReplyIntervalSeconds}" ${sourceDisabled || !perception.longTaskReplyEnabled ? "disabled" : ""} /><em>秒</em></label>
-            <label class="perception-long-task-reply__template"><span>内容</span><input data-setting="petPerception" data-perception-setting="longTaskReplyTemplate" type="text" maxlength="160" value="${escapeHtml(perception.longTaskReplyTemplate)}" ${sourceDisabled || !perception.longTaskReplyEnabled ? "disabled" : ""} /></label>
-          </div>
-        </section>
-      </details>
-      <div class="settings-section-title">状态灯</div>
-      <section class="perception-status-light-settings">
-        <div class="perception-status-light-settings__header">
-          <div class="setting-copy"><strong>位置与运动</strong></div>
-          <div class="perception-motion-preview" data-motion="${statusLightMotion}" aria-label="${petStatusLightMotionLabel(statusLightMotion)} 预览"><span></span></div>
-        </div>
-        <label class="perception-status-light-settings__control">
-          <span>状态灯模式</span>
-          <select class="agent-select" data-setting="petPerception" data-perception-setting="statusLightMotion" ${sourceDisabled}>
-            <option value="static" ${statusLightMotion === "static" ? "selected" : ""}>固定左上角（默认）</option>
-            <option value="orbit" ${statusLightMotion === "orbit" ? "selected" : ""}>环绕桌宠</option>
-            <option value="square" ${statusLightMotion === "square" ? "selected" : ""}>方形巡航</option>
-            <option value="wingman" ${statusLightMotion === "wingman" ? "selected" : ""}>僚机跟随</option>
-          </select>
-        </label>
-      </section>
-      <details class="perception-advanced-panel">
-        <summary><span><strong>实时观察</strong></span><em>查看</em></summary>
-        ${renderPerceptionObservation(settings, petPerceptionSnapshot)}
-      </details>
-      <details class="perception-advanced-panel">
-        <summary><span><strong>手动协同感知</strong></span><em>按需使用</em></summary>
-        ${renderPerceptionTrigger(settings)}
-      </details>
-      <button id="settings-save" class="settings-done" type="button" ${saving || !dirty ? "disabled" : ""}>${saving ? "保存中…" : "保存全部"}</button>
+      <div id="perception-capabilities" class="perception-capabilities">
+        ${renderPerceptionCapabilities(settings)}
+      </div>
+    </section>
+  `;
+}
+
+function renderPerceptionCapabilities(settings: PetSettings): string {
+  const perception = settings.petPerception;
+  return [
+    { icon: "chat" as IconBadgeName, color: "blue" as SettingCardIconColor, label: "聊天", enabled: perception.botActivity },
+    { icon: "task" as IconBadgeName, color: "blue" as SettingCardIconColor, label: "任务", enabled: perception.taskActivity },
+    { icon: "app-status" as IconBadgeName, color: "blue" as SettingCardIconColor, label: "应用状态", enabled: perception.agentRuntime },
+    { icon: "memory" as IconBadgeName, color: "purple" as SettingCardIconColor, label: "自动记忆", enabled: autoMemoryEnabled },
+  ].map((item) => `
+    <div class="perception-capability">
+      ${renderIconBadge(item.icon, item.color)}
+      <strong>${item.label}</strong>
+      ${renderPerceptionCheckStatus(item.enabled)}
+    </div>
+  `).join("");
+}
+
+function perceptionAdvancedSourceOptions(settings: PetSettings): string {
+  const sourceScope = perceptionSourceScope(settings);
+  const labels: Record<PerceptionSourceScope, string> = {
+    none: "暂不感知",
+    task: "任务",
+    "task-agent": "任务 + 应用状态",
+    "task-bot": "聊天 + 任务",
+    all: "聊天 / 任务 / 应用状态",
+    custom: "自定义来源",
+  };
+  return Object.entries(labels).map(([value, label]) => `<option value="${value}" ${sourceScope === value ? "selected" : ""}>${label}</option>`).join("");
+}
+
+function renderPerceptionAdvancedItem(settings: PetSettings, props: PerceptionItemProps, sourceControl = false): string {
+  if (!sourceControl) return renderPerceptionItem(props);
+  return renderPerceptionItem({
+    ...props,
+    control: `<span class="perception-item__select-wrap"><select class="perception-advanced-select" data-setting="petPerception" data-perception-setting="sourceScope" aria-label="观察来源">${perceptionAdvancedSourceOptions(settings)}</select><span class="perception-item__arrow" aria-hidden="true">&rsaquo;</span></span>`,
+  });
+}
+
+function renderPerceptionRuleSection(title: string, icon: IconBadgeName, color: SettingCardIconColor, items: string): string {
+  return `<section class="perception-rule-section"><div class="perception-rule-title">${renderIconBadge(icon, color)}<strong>${title}</strong></div><div class="perception-card perception-card--stacked">${items}</div></section>`;
+}
+
+function renderPetPerceptionAdvancedPage(settings: PetSettings): string {
+  const perception = settings.petPerception;
+  const feedbackMode = perceptionFeedbackMode(settings);
+  return `
+    <div class="settings-page settings-page--perception-advanced">
+      ${renderPerceptionPageHeading("高级设置", "自定义更详细的感知规则与提醒方式")}
+      <div class="perception-advanced-divider"></div>
+      ${renderPerceptionRuleSection("感知规则", "eye", "purple", [
+        renderPerceptionAdvancedItem(settings, { icon: "eye", iconColor: "purple", title: "观察来源", description: "选择小卡拉米可以观察的内容来源", value: "" }, true),
+        renderPerceptionItem({ icon: "filter", iconColor: "purple", title: "关键词过滤", description: "忽略包含指定关键词的内容", value: "未设置" }),
+        renderPerceptionItem({ icon: "sensitive", iconColor: "orange", title: "敏感内容处理", description: "遇到敏感内容时的处理方式", value: "智能处理" }),
+      ].join(""))}
+      ${renderPerceptionRuleSection("提醒规则", "frequency", "blue", [
+        renderPerceptionItem({ icon: "frequency", iconColor: "blue", title: "主动提醒频率", description: "小卡拉米主动找你的频率", value: perception.longTaskReplyEnabled ? "智能调节" : "暂不开启" }),
+        renderPerceptionItem({ icon: "event", iconColor: "green", title: "重要事件提醒", description: "哪些事件需要立即提醒你", value: perception.taskCompletionNotice ? "已开启" : "未开启" }),
+        renderPerceptionItem({ icon: "quiet", iconColor: "yellow", title: "安静时段", description: "在指定时间段内减少打扰", value: "未设置" }),
+      ].join(""))}
+      ${renderPerceptionRuleSection("反馈规则", "rule", "purple", [
+        renderPerceptionItem({ icon: "rule", iconColor: "purple", title: "提醒规则", description: "满足什么条件时发送陪伴提醒", value: "默认规则" }),
+        renderPerceptionItem({ icon: "content", iconColor: "blue", title: "反馈内容", description: "反馈中包含哪些信息", value: feedbackMode === "full" ? "进度 + 结果" : perceptionFeedbackModeLabel(feedbackMode) }),
+        renderPerceptionItem({ icon: "display", iconColor: "purple", title: "展示方式", description: "如何向你展示陪伴反馈", value: perception.bubbleFeedback ? "气泡通知" : "仅动作" }),
+      ].join(""))}
+      <aside class="perception-tip-card">
+        ${renderIconBadge("tip", "purple")}
+        <div><strong>小贴士</strong><p>高级设置适合有特殊需求的用户，建议优先使用默认设置，以获得最佳体验。</p></div>
+      </aside>
+    </div>
+  `;
+}
+
+function renderPerceptionSelect(setting: string, options: Array<[string, string]>, selected: string, disabled = false): string {
+  return `<select class="agent-select perception-detail-select" data-setting="petPerception" data-perception-setting="${escapeHtml(setting)}" aria-label="${escapeHtml(setting)}" ${disabled ? "disabled" : ""}>${options.map(([value, label]) => `<option value="${escapeHtml(value)}" ${selected === value ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select>`;
+}
+
+function renderPerceptionDetailPage(settings: PetSettings): string {
+  const perception = settings.petPerception;
+  const disabled = !perception.enabled;
+  const detailMeta: Record<PerceptionDetail, { title: string; description: string; section: string }> = {
+    companion: { title: "主动陪伴", description: "设置小卡拉米什么时候主动找你", section: "提醒方式" },
+    interaction: { title: "互动表现", description: "设置小卡拉米如何回应你", section: "回应方式" },
+    "task-feedback": { title: "任务反馈", description: "设置任务完成后的反馈方式", section: "反馈方式" },
+    position: { title: "位置与停靠", description: "看看小卡拉米停在哪里", section: "停靠说明" },
+    movement: { title: "移动与跟随", description: "了解小卡拉米如何陪着你移动", section: "移动说明" },
+    "status-light": { title: "状态灯", description: "设置桌宠状态提示方式", section: "提示方式" },
+  };
+  const meta = detailMeta[perceptionDetail];
+  let body = "";
+  if (perceptionDetail === "companion") {
+    body = renderPerceptionCard([
+      { icon: "frequency", iconColor: "purple", title: "主动提醒频率", description: "小卡拉米主动找你的频率", value: perception.longTaskReplyEnabled ? "智能调节" : "暂不开启", control: renderPerceptionSelect("digestMode", [["on", "智能调节"], ["off", "暂不开启"]], perceptionDigestMode(settings), disabled) },
+      { icon: "event", iconColor: "green", title: "重要事件提醒", description: "重要任务完成时及时告诉你", value: perception.taskCompletionNotice ? "已开启" : "未开启", control: `<label class="perception-inline-switch"><input data-setting="petPerception" data-perception-setting="taskCompletionNotice" type="checkbox" ${perception.taskCompletionNotice ? "checked" : ""} ${disabled ? "disabled" : ""} /><span class="cute-switch__track"></span></label>` },
+    ], "perception-card--stacked");
+  } else if (perceptionDetail === "interaction" || perceptionDetail === "task-feedback") {
+    body = renderPerceptionCard([
+      { icon: "interaction", iconColor: "blue", title: perceptionDetail === "interaction" ? "互动表现" : "任务反馈", description: perceptionDetail === "interaction" ? "小卡拉米如何回应你" : "任务处理完成后如何回应", value: perceptionFeedbackModeLabel(perceptionFeedbackMode(settings)), control: renderPerceptionSelect("feedbackMode", [["full", "动作 + 气泡"], ["action", "仅动作"], ["bubble", "仅气泡"], ["silent", "静默"]], perceptionFeedbackMode(settings), disabled) },
+      { icon: "display", iconColor: "purple", title: "展示方式", description: "如何向你展示陪伴反馈", value: perception.bubbleFeedback ? "气泡通知" : "仅动作" },
+    ], "perception-card--stacked");
+  } else if (perceptionDetail === "status-light") {
+    const statusLight = perception.statusLightMotion ?? "static";
+    body = renderPerceptionCard([
+      { icon: "status-light", iconColor: "yellow", title: "状态灯模式", description: "选择状态灯停留和移动方式", value: petStatusLightMotionLabel(statusLight), control: renderPerceptionSelect("statusLightMotion", [["static", "固定左上角"], ["orbit", "环绕桌宠"], ["square", "方形巡航"], ["wingman", "僚机跟随"]], statusLight, disabled) },
+    ], "perception-card--stacked");
+  } else if (perceptionDetail === "position") {
+    body = renderPerceptionCard([
+      { icon: "location", iconColor: "orange", title: "当前停靠", description: "拖动桌宠窗口即可调整停靠位置", value: "跟随当前桌面位置" },
+      { icon: "personalization", iconColor: "purple", title: "陪伴时置顶", description: "让小卡拉米保持在其他窗口上方", value: settings.alwaysOnTop ? "已开启" : "未开启" },
+    ], "perception-card--stacked");
+  } else {
+    body = renderPerceptionCard([
+      { icon: "move", iconColor: "blue", title: "移动与跟随", description: "桌宠窗口支持拖动和自由停靠", value: "允许移动" },
+      { icon: "tip", iconColor: "purple", title: "小提示", description: "按住小卡拉米即可把它移动到喜欢的位置", value: "随时可调整" },
+    ], "perception-card--stacked");
+  }
+  return `
+    <div class="settings-page settings-page--perception-detail">
+      ${renderPerceptionPageHeading(meta.title, meta.description)}
+      <div class="perception-section-title">${meta.section}</div>
+      ${body}
     </div>
   `;
 }
@@ -1747,104 +1990,105 @@ function renderPetStylePage(settings: PetSettings): string {
   ].join("");
 }
 
-function renderHome(settings: PetSettings): string {
+function renderAppearancePage(settings: PetSettings): string {
+  return `
+    <div class="settings-page settings-page--appearance">
+      <div class="settings-title-row">
+        <div><div class="settings-page-kicker">APPEARANCE</div><h1>外观</h1></div>
+        <span class="settings-save-state ${dirty ? "is-dirty" : ""}">${dirty ? "待保存" : "已保存"}</span>
+      </div>
+      <p class="settings-page-intro">选择桌宠设置中心的主题和宠物风格。</p>
+      <div class="settings-section-title">外观主题</div>
+      <section class="settings-surface-card settings-surface-card--padded">${renderThemePicker(settings.theme)}</section>
+      <div class="settings-section-title">宠物风格</div>
+      ${renderPetStylePicker(settings)}
+      <button id="settings-save" class="settings-done" type="button" ${saving || !dirty ? "disabled" : ""}>${saving ? "保存中…" : "保存"}</button>
+    </div>
+  `;
+}
 
+function renderPersonalizationPage(settings: PetSettings): string {
+  const selectedReplyStyle = replyStyle === "balanced" ? "warm" : replyStyle;
+  const replyOptions = ([
+    ["warm", "温柔"],
+    ["concise", "简洁"],
+    ["detailed", "详细"],
+  ] as Array<[ReplyStyle, string]>)
+    .map(([value, label]) => `<option value="${value}" ${selectedReplyStyle === value ? "selected" : ""}>${label}</option>`)
+    .join("");
+  return `
+    <div class="settings-page settings-page--personalization">
+      <div class="settings-title-row">
+        <div><div class="settings-page-kicker">PERSONALIZATION</div><h1>个性化</h1></div>
+        <span class="settings-save-state ${dirty ? "is-dirty" : ""}">${dirty ? "待保存" : "已保存"}</span>
+      </div>
+      <p class="settings-page-intro">调整桌宠的称呼、表达方式和陪伴习惯。</p>
+
+      <div class="settings-section-title">称呼</div>
+      <section class="settings-surface-card personalization-callname-card" aria-label="桌宠称呼设置">
+        <div class="settings-surface-card__heading"><span class="setting-card__icon setting-card__icon--purple" aria-hidden="true">◉</span><div><strong>称呼</strong><small>这些称呼会用于日常对话。</small></div></div>
+        <div class="pet-callname-card__fields">
+          <label class="pet-callname-field"><span>桌宠</span><input data-setting="petName" type="text" maxlength="24" value="${escapeHtml(settings.petName)}" autocomplete="off" /></label>
+          <label class="pet-callname-field"><span>主人</span><input data-setting="userName" type="text" maxlength="24" value="${escapeHtml(settings.userName)}" autocomplete="off" /></label>
+        </div>
+      </section>
+
+      <div class="settings-section-title">回复风格</div>
+      <section class="settings-surface-card personalization-style-card">
+        <div class="settings-surface-card__heading"><span class="setting-card__icon setting-card__icon--blue" aria-hidden="true">文</span><div><strong>回复风格</strong><small>选择桌宠说话时更接近你的方式。</small></div></div>
+        <select id="personalization-reply-style" class="agent-select personalization-select" data-personalization-setting="replyStyle" aria-label="回复风格">${replyOptions}</select>
+      </section>
+
+      <div class="settings-section-title">互动偏好</div>
+      <section class="settings-surface-card settings-surface-card--preferences personalization-preferences-card">
+        <label class="setting-card-compact setting-card-compact--static"><span class="setting-card__copy"><strong>陪伴时始终置顶</strong><small>让桌宠始终出现在其他窗口上方</small></span><span class="cute-switch"><input data-setting="alwaysOnTop" type="checkbox" ${settings.alwaysOnTop ? "checked" : ""} /><span class="cute-switch__track"></span></span></label>
+        <label class="setting-card-compact setting-card-compact--static"><span class="setting-card__copy"><strong>消息气泡</strong><small>显示桌宠的聊天和提醒气泡</small></span><span class="cute-switch"><input data-setting="showWeChatBubbles" type="checkbox" ${settings.showWeChatBubbles ? "checked" : ""} /><span class="cute-switch__track"></span></span></label>
+        <label class="setting-card-compact setting-card-compact--static"><span class="setting-card__copy"><strong>处理中提示</strong><small>桌宠思考或处理任务时显示提示</small></span><span class="cute-switch"><input data-setting="showThinkingBubbles" type="checkbox" ${settings.showThinkingBubbles ? "checked" : ""} /><span class="cute-switch__track"></span></span></label>
+      </section>
+
+      <button id="settings-save" class="settings-done" type="button" ${saving || !dirty ? "disabled" : ""}>${saving ? "保存中…" : "保存"}</button>
+    </div>
+  `;
+}
+
+function renderHome(settings: PetSettings): string {
   const saveLabel = saving ? "保存中…" : "保存";
   const saveDisabled = saving || !dirty ? "disabled" : "";
-  const dirtyHint = dirty ? "待保存" : "已保存";
   const accountCount = settings.wechatAccounts.length + settings.qqAccounts.length + settings.feishuAccounts.length + settings.dingtalkAccounts.length;
-
   return `
     <div class="settings-page settings-page--home">
-      <div class="settings-title-row">
-        <div><div class="settings-page-kicker">SETTINGS</div><h1>设置</h1></div>
-        <span class="settings-save-state ${dirty ? "is-dirty" : ""}">${dirtyHint}</span>
+      <div class="settings-title-row"><div><div class="settings-page-kicker">SETTINGS</div><h1>设置</h1></div></div>
+      <div class="home-main-column">
+          <div class="settings-section-title">外观</div>
+          ${renderSettingCardCompact({ id: "open-appearance-settings", icon: "sparkle", iconColor: "purple", title: "外观主题", description: "主题、模式和桌宠风格" })}
+
+          <div class="settings-section-title">个性化</div>
+          ${renderSettingCardCompact({ id: "open-personalization", icon: "personalization", iconColor: "purple", title: "个性化", description: "称呼、回复风格和互动偏好" })}
+
+          <div class="settings-section-title">机器人中心</div>
+          ${renderSettingCardCompact({ id: "open-bot-center", icon: "bots", iconColor: "blue", title: "机器人中心", description: "管理已连接的机器人账号", badge: accountCount > 0 ? `${accountCount} 个账号` : "未配置", ariaLabel: "打开机器人中心" })}
+
+          <div class="settings-section-title">AI 能力</div>
+          ${renderSettingCardCompact({ id: "open-agent-config", icon: "agent", iconColor: "purple", title: "AI Agent", description: "Agent 模型与能力配置" })}
+          ${renderSettingCardCompact({ id: "open-auto-memory", icon: "memory", iconColor: "green", title: "自动记忆", description: "桌宠会自动学习重要信息", badge: autoMemoryEnabled ? "已开启" : "已关闭" })}
+
+          <div class="settings-section-title">系统</div>
+          ${renderSettingCardCompact({ id: "open-pet-perception", icon: "pet-perception", iconColor: "orange", title: "桌宠感知", description: "感知设置与陪伴规则" })}
+          ${renderSettingCardCompact({ id: "open-diagnostics", icon: "diagnostics", iconColor: "yellow", title: "诊断中心", description: "运行状态与问题诊断" })}
+          ${renderSettingCardCompact({ id: "open-data-settings", icon: "privacy", iconColor: "blue", title: "数据与隐私", description: "数据管理与隐私设置" })}
+          ${renderSettingCardCompact({ id: "open-about-settings", icon: "info", iconColor: "gray", title: "关于", description: "版本信息与帮助" })}
+
+          ${renderFirstUseGuide()}
+
+          <div class="settings-section-title">更多偏好</div>
+          <section class="settings-surface-card settings-surface-card--preferences">
+            <label class="setting-card-compact setting-card-compact--static"><span class="setting-card__copy"><strong>始终置顶</strong></span><span class="cute-switch"><input data-setting="alwaysOnTop" type="checkbox" ${settings.alwaysOnTop ? "checked" : ""} /><span class="cute-switch__track"></span></span></label>
+            <label class="setting-card-compact setting-card-compact--static"><span class="setting-card__copy"><strong>聊天记录</strong></span><span class="cute-switch"><input data-setting="saveChatHistory" type="checkbox" ${settings.saveChatHistory ? "checked" : ""} /><span class="cute-switch__track"></span></span></label>
+            <label class="setting-card-compact setting-card-compact--static"><span class="setting-card__copy"><strong>消息气泡总开关</strong></span><span class="cute-switch"><input data-setting="showWeChatBubbles" type="checkbox" ${settings.showWeChatBubbles ? "checked" : ""} /><span class="cute-switch__track"></span></span></label>
+            <label class="setting-card-compact setting-card-compact--static"><span class="setting-card__copy"><strong>处理中提示</strong></span><span class="cute-switch"><input data-setting="showThinkingBubbles" type="checkbox" ${settings.showThinkingBubbles ? "checked" : ""} /><span class="cute-switch__track"></span></span></label>
+          </section>
+          <button id="settings-save" class="settings-done" type="button" ${saveDisabled}>${saveLabel}</button>
       </div>
-
-      <div class="settings-section-title">外观</div>
-      ${renderThemePicker(settings.theme)}
-      ${renderPetStylePicker(settings)}
-      <section class="pet-callname-card" aria-label="桌宠称呼设置">
-        <div class="pet-callname-card__header">
-          <div><strong>称呼</strong></div>
-          <span class="pet-callname-card__badge">个性化</span>
-        </div>
-        <div class="pet-callname-card__fields">
-          <label class="pet-callname-field">
-            <span>桌宠</span>
-            <input data-setting="petName" type="text" maxlength="24" value="${escapeHtml(settings.petName)}" autocomplete="off" />
-          </label>
-          <label class="pet-callname-field">
-            <span>主人</span>
-            <input data-setting="userName" type="text" maxlength="24" value="${escapeHtml(settings.userName)}" autocomplete="off" />
-          </label>
-        </div>
-      </section>
-
-      <div class="settings-section-title">机器人中心</div>
-      <button id="open-bot-center" class="home-bot-card" type="button" aria-label="打开机器人中心">
-        <span class="home-bot-card__icon">Bot</span>
-        <span class="home-bot-card__copy"><strong>微信 · QQ · 飞书 · 钉钉</strong><em>${accountCount} 个账号已配置</em></span>
-        <span class="home-bot-card__arrow" aria-hidden="true">&rsaquo;</span>
-      </button>
-
-      <div class="settings-section-title">预设</div>
-      <section class="settings-list settings-list--compact">
-        <button id="open-pet-perception" class="setting-row setting-row--navigation" type="button">
-          <span class="setting-icon setting-icon--blue">感</span>
-          <span class="setting-copy"><strong>桌宠感知</strong></span>
-          <span class="setting-arrow">&rsaquo;</span>
-        </button>
-        <button id="open-agent-config" class="setting-row setting-row--navigation" type="button">
-          <span class="setting-icon setting-icon--purple">AI</span>
-          <span class="setting-copy"><strong>Agent</strong></span>
-          <span class="setting-arrow">&rsaquo;</span>
-        </button>
-        <button id="open-memory" class="setting-row setting-row--navigation" type="button">
-          <span class="setting-icon setting-icon--green">记</span>
-          <span class="setting-copy"><strong>长期记忆</strong><small>${memorySummary?.approved ?? 0} 条已确认${memorySummary?.pending ? ` · ${memorySummary.pending} 条待审核` : ""}</small></span>
-          <span class="setting-arrow">&rsaquo;</span>
-        </button>
-        <button id="open-diagnostics" class="setting-row setting-row--navigation" type="button">
-          <span class="setting-icon setting-icon--yellow">诊</span>
-          <span class="setting-copy"><strong>诊断中心</strong></span>
-          <span class="setting-arrow">&rsaquo;</span>
-        </button>
-        <button id="open-data-settings" class="setting-row setting-row--navigation" type="button">
-          <span class="setting-icon setting-icon--green">数</span>
-          <span class="setting-copy"><strong>数据与隐私</strong></span>
-          <span class="setting-arrow">&rsaquo;</span>
-        </button>
-        <button id="open-about-settings" class="setting-row setting-row--navigation" type="button">
-          <span class="setting-icon setting-icon--purple">关</span>
-          <span class="setting-copy"><strong>关于</strong></span>
-          <span class="setting-arrow">&rsaquo;</span>
-        </button>
-      </section>
-
-      ${renderFirstUseGuide()}
-
-      <div class="settings-section-title">偏好</div>
-      <section class="settings-list settings-list--compact">
-        <label class="setting-row">
-          <span class="setting-copy"><strong>始终置顶</strong></span>
-          <span class="cute-switch"><input data-setting="alwaysOnTop" type="checkbox" ${settings.alwaysOnTop ? "checked" : ""} /><span class="cute-switch__track"></span></span>
-        </label>
-        <label class="setting-row">
-          <span class="setting-copy"><strong>聊天记录</strong></span>
-          <span class="cute-switch"><input data-setting="saveChatHistory" type="checkbox" ${settings.saveChatHistory ? "checked" : ""} /><span class="cute-switch__track"></span></span>
-        </label>
-        <label class="setting-row">
-          <span class="setting-copy"><strong>消息气泡总开关</strong></span>
-          <span class="cute-switch"><input data-setting="showWeChatBubbles" type="checkbox" ${settings.showWeChatBubbles ? "checked" : ""} /><span class="cute-switch__track"></span></span>
-        </label>
-        <label class="setting-row">
-          <span class="setting-copy"><strong>处理中提示</strong></span>
-          <span class="cute-switch"><input data-setting="showThinkingBubbles" type="checkbox" ${settings.showThinkingBubbles ? "checked" : ""} /><span class="cute-switch__track"></span></span>
-        </label>
-      </section>
-
-      <button id="settings-save" class="settings-done" type="button" ${saveDisabled}>${saveLabel}</button>
     </div>
   `;
 }
@@ -2001,38 +2245,81 @@ function renderDataPage(): string {
   `;
 }
 
-function renderMemoryPage(): string {
-  const pending = memoryEntries.filter((entry) => entry.status === "pending");
-  const approved = memoryEntries.filter((entry) => entry.status === "approved");
-  const userProfile = approved.filter((entry) => entry.scope === "user");
-  const petMemory = approved.filter((entry) => entry.scope !== "user");
-  const emptyText = memoryLoading
-    ? "正在读取记忆…"
-    : memoryMessage.includes("失败")
-      ? "记忆读取失败，请点击刷新列表重试。"
-      : memoryEntries.length === 0
-        ? "还没有长期记忆，继续聊天或整理最近对话后会显示在这里。"
-        : "暂无内容";
-  const renderEntry = (entry: MemoryEntry, pendingEntry: boolean) => `
-    <article class="memory-entry">
-      <div class="memory-entry__copy"><span class="memory-entry__kind">${escapeHtml(memoryScopeLabel(entry.scope))} · ${escapeHtml(memoryKindLabel(entry.kind))}</span><p>${escapeHtml(entry.content)}</p><small>${escapeHtml(memorySourceLabel(entry.source))} · ${escapeHtml(memoryUpdatedLabel(entry.updatedAt))}</small></div>
-      <div class="memory-entry__actions">
-        ${pendingEntry ? `<button class="settings-secondary settings-secondary--compact" data-memory-approve="${escapeHtml(entry.id)}" type="button">批准</button><button class="settings-secondary settings-secondary--compact" data-memory-reject="${escapeHtml(entry.id)}" type="button">拒绝</button>` : ""}
-        <button class="settings-secondary settings-secondary--compact" data-memory-remove="${escapeHtml(entry.id)}" type="button">删除</button>
+interface MemoryCategoryGroup {
+  title: string;
+  description: string;
+  icon: string;
+  className: string;
+  entries: MemoryEntry[];
+}
+
+function memoryCategoryGroups(entries: MemoryEntry[]): MemoryCategoryGroup[] {
+  return [
+    { title: "项目记忆", description: "关于你正在进行的项目和目标", icon: "▰", className: "project", entries: entries.filter((entry) => entry.type === "project" || entry.type === "knowledge") },
+    { title: "偏好记忆", description: "关于你的偏好和习惯", icon: "♥", className: "preference", entries: entries.filter((entry) => entry.type === "preference") },
+    { title: "工作方式", description: "关于你的工作流程和风格", icon: "✦", className: "habit", entries: entries.filter((entry) => entry.type === "behavior" || entry.type === "skill" || entry.type === "user_profile" || entry.type === "temporary") },
+    { title: "重要决定", description: "关于你的重要决策和选择", icon: "▮", className: "decision", entries: entries.filter((entry) => entry.type === "decision") },
+  ];
+}
+
+function memoryDateLabel(entry: MemoryEntry): string {
+  const timestamp = Date.parse(entry.updatedAt || entry.createdAt || "");
+  if (!Number.isFinite(timestamp)) return "最近";
+  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit" }).format(new Date(timestamp));
+}
+
+function renderMemoryEntry(entry: MemoryEntry): string {
+  return `
+    <article class="memory-entry memory-entry--friendly">
+      <div class="memory-entry__copy">
+        <strong>自动整理</strong>
+        <p>${escapeHtml(entry.summary ?? "")}</p>
+        <small>来源：自动整理 · ${memoryDateLabel(entry)}</small>
       </div>
+      <button class="memory-entry__remove" data-memory-remove="${escapeHtml(entry.id)}" type="button" aria-label="删除这条记忆" title="删除">删除</button>
     </article>`;
-  const renderSection = (title: string, entries: MemoryEntry[], pendingEntry = false) => `
-      <div class="settings-section-title">${title} · ${entries.length}</div>
-      <section class="memory-list">${entries.length ? entries.map((entry) => renderEntry(entry, pendingEntry)).join("") : `<div class="data-summary-empty">${emptyText}</div>`}</section>`;
+}
+
+function renderMemoryCategoryDetails(group: MemoryCategoryGroup): string {
+  return `
+    <section class="memory-category-card memory-category-card--${group.className}">
+      <div class="memory-category-card__header"><span class="memory-category-card__icon" aria-hidden="true">${group.icon}</span><div><strong>${group.title}</strong><small>${group.description}</small></div><span class="memory-category-card__count">${group.entries.length}</span></div>
+      <div class="memory-category-card__list">${group.entries.length ? group.entries.map(renderMemoryEntry).join("") : `<p class="memory-category-card__empty">还没有相关内容</p>`}</div>
+    </section>`;
+}
+
+function renderMemoryPage(): string {
+  const visibleEntries = memoryEntries.filter((entry) => entry.status === "approved" && (entry.summary?.trim() ?? "").length > 0);
+  const groups = memoryCategoryGroups(visibleEntries);
+  const emptyText = memoryLoading ? "正在读取…" : memoryMessage.includes("失败") ? "暂时无法读取，请稍后重试。" : "桌宠会在聊天中慢慢了解你。";
   return `
     <div class="settings-page settings-page--memory">
-      <div class="settings-title-row"><div><h1>长期记忆</h1></div><span class="settings-save-state">自动整理 · ${approved.length} 条已保存${pending.length ? ` · ${pending.length} 条待审核` : ""}</span></div>
-      <p class="settings-page-intro">桌宠只会保存提炼后的稳定偏好、项目规则、事实和决定。问题、一次性任务、临时故障和过程指令默认忽略；明确说“记住”也会先拆分提炼，聊天原文和凭据不会写进长期记忆。</p>
+      <div class="settings-title-row"><div><div class="settings-page-kicker">AUTO MEMORY</div><h1>自动记忆</h1></div></div>
+      <section class="memory-auto-card">
+        <span class="setting-card__icon setting-card__icon--green" aria-hidden="true">✦</span>
+        <div class="setting-card__copy"><strong data-auto-memory-title>${autoMemoryEnabled ? "自动记忆已开启" : "自动记忆已关闭"}</strong><small>桌宠会自动保存对未来有帮助的信息。</small></div>
+        <span class="cute-switch"><input id="memory-auto-toggle" type="checkbox" data-personalization-setting="autoMemory" ${autoMemoryEnabled ? "checked" : ""} /><span class="cute-switch__track"></span></span>
+      </section>
+      <p class="settings-page-intro">桌宠会从对话中整理对未来有帮助的信息，不保存原始聊天。</p>
       <small id="memory-message" class="data-summary-message" ${memoryMessage ? "" : "hidden"}>${escapeHtml(memoryMessage)}</small>
-      <div class="settings-page-actions"><button id="refresh-memory" class="settings-secondary" type="button" ${memoryLoading || memoryOrganizing ? "disabled" : ""}>${memoryLoading ? "读取中…" : "刷新列表"}</button><button id="organize-memory" class="settings-secondary" type="button" ${memoryLoading || memoryOrganizing ? "disabled" : ""}>${memoryOrganizing ? "重整理中…" : "重整理现有记忆"}</button><button id="clear-memory" class="settings-secondary" type="button" ${(memoryEntries.length === 0 || memoryLoading || memoryOrganizing) ? "disabled" : ""}>清空记忆</button></div>
-      ${renderSection("用户画像", userProfile)}
-      ${renderSection("桌宠记忆", petMemory)}
-      ${renderSection("待审核", pending, true)}
+      <div class="memory-known-title">桌宠已经了解</div>
+      <div class="memory-stat-grid">${groups.map((group) => `<article class="memory-stat-card memory-stat-card--${group.className}"><span class="memory-category-card__icon" aria-hidden="true">${group.icon}</span><div><strong>${group.title}</strong><small>${group.description}</small></div><span class="memory-category-card__count">${group.entries.length}</span></article>`).join("")}</div>
+      ${visibleEntries.length === 0 ? `<div class="memory-empty-state">${emptyText}</div>` : ""}
+      ${renderSettingCardCompact({ id: "open-all-memory", icon: "memory-all", iconColor: "purple", title: "管理全部记忆", description: "查看或删除桌宠已经整理的内容" })}
+    </div>`;
+}
+
+function renderMemoryAllPage(): string {
+  const visibleEntries = memoryEntries.filter((entry) => entry.status === "approved" && (entry.summary?.trim() ?? "").length > 0);
+  const groups = memoryCategoryGroups(visibleEntries);
+  const emptyText = memoryLoading ? "正在读取…" : memoryMessage.includes("失败") ? "暂时无法读取，请稍后重试。" : "桌宠会在聊天中慢慢了解你。";
+  return `
+    <div class="settings-page settings-page--memory-all">
+      <div class="settings-title-row"><div><div class="settings-page-kicker">ALL MEMORY</div><h1>全部记忆</h1></div></div>
+      <p class="settings-page-intro">查看或删除桌宠已经整理的内容，聊天原文不会显示在这里。</p>
+      <small id="memory-message" class="data-summary-message" ${memoryMessage ? "" : "hidden"}>${escapeHtml(memoryMessage)}</small>
+      <div class="memory-category-grid">${visibleEntries.length ? groups.map(renderMemoryCategoryDetails).join("") : `<div class="memory-empty-state">${emptyText}</div>`}</div>
+      <button id="clear-memory" class="memory-clear-link" type="button" ${(visibleEntries.length === 0 || memoryLoading) ? "disabled" : ""}>清除全部记忆</button>
     </div>`;
 }
 
@@ -2170,43 +2457,13 @@ function renderBotCenter(settings: PetSettings): string {
           <div class="settings-page-kicker">BOT CHANNELS</div>
           <h1>机器人中心</h1>
         </div>
-        <span class="settings-save-state">${settings.wechatAccounts.length + settings.qqAccounts.length + settings.feishuAccounts.length + settings.dingtalkAccounts.length} 个账号</span>
       </div>
+      <p class="settings-page-intro">连接你常用的聊天平台，让桌宠在需要的地方陪伴你。</p>
       <div class="settings-section-title">聊天机器人</div>
-      <section class="settings-list bot-channel-list">
-        <button id="open-wechat-config" class="setting-row setting-row--navigation bot-channel-row" type="button">
-          <span class="setting-icon setting-icon--green">微</span>
-          <span class="setting-copy">
-            <strong>微信机器人</strong>
-            <small>${escapeHtml(wechatSummary)} · ${settings.wechatAccounts.length} 个会话</small>
-          </span>
-          <span class="setting-arrow">›</span>
-        </button>
-        <button id="open-qq-config" class="setting-row setting-row--navigation bot-channel-row" type="button">
-          <span class="setting-icon setting-icon--blue">QQ</span>
-          <span class="setting-copy">
-            <strong>QQ 机器人</strong>
-            <small>${escapeHtml(qqSummary)} · ${settings.qqAccounts.length} 个账号</small>
-          </span>
-          <span class="setting-arrow">›</span>
-        </button>
-        <button id="open-dingtalk-config" class="setting-row setting-row--navigation bot-channel-row" type="button">
-          <span class="setting-icon setting-icon--orange">钉</span>
-          <span class="setting-copy">
-            <strong>钉钉机器人</strong>
-            <small>${escapeHtml(dingtalkSummary)} · ${settings.dingtalkAccounts.length} 个账号</small>
-          </span>
-          <span class="setting-arrow">›</span>
-        </button>
-        <button id="open-feishu-config" class="setting-row setting-row--navigation bot-channel-row" type="button">
-          <span class="setting-icon setting-icon--purple">飞</span>
-          <span class="setting-copy">
-            <strong>飞书机器人</strong>
-            <small>${escapeHtml(feishuSummary)} · ${settings.feishuAccounts.length} 个账号</small>
-          </span>
-          <span class="setting-arrow">›</span>
-        </button>
-      </section>
+      ${renderSettingCardCompact({ id: "open-wechat-config", icon: "wechat", iconColor: "green", title: "微信", description: wechatSummary, badge: wechatStatus.connected ? "已连接" : undefined })}
+      ${renderSettingCardCompact({ id: "open-qq-config", icon: "qq", iconColor: "blue", title: "QQ", description: qqSummary, badge: qqStatus?.state === "connected" ? "已连接" : undefined })}
+      ${renderSettingCardCompact({ id: "open-feishu-config", icon: "feishu", iconColor: "purple", title: "飞书", description: feishuSummary, badge: feishuStatus?.state === "connected" ? "已连接" : undefined })}
+      ${renderSettingCardCompact({ id: "open-dingtalk-config", icon: "dingtalk", iconColor: "orange", title: "钉钉", description: dingtalkSummary, badge: dingtalkStatus?.state === "connected" ? "已连接" : undefined })}
 
     </div>
   `;
@@ -2659,22 +2916,47 @@ function agentAccessModeUpdate(mode: AgentAccessMode): Partial<PetSettings> {
 
 function zeroTokenStatusText(settings: PetSettings): string {
   if (!settings.zeroToken.enabled) return "关闭时继续使用当前已有模型/API 配置";
-  if (!zeroTokenStatus) return "WebModel 尚未检测";
-  if (zeroTokenStatus.state === "connected") {
-    const model = zeroTokenStatus.model || settings.zeroToken.model;
-    return `🟦 WebModel 已连接${model ? ` · ${zeroTokenModelLabel(model)}` : ""}`;
-  }
-  return zeroTokenStatus.detail;
+  if (!zeroTokenStatus) return "尚未检测网页登录状态";
+  return zeroTokenStatus.detail || zeroTokenStatus.providerName;
+}
+
+function zeroTokenRuntimeStatusLabel(status: ZeroTokenProviderStatus["status"]): string {
+  if (status === "ready") return "🟢 已连接";
+  if (status === "starting" || status === "logging_in") return "🟡 登录中";
+  if (status === "login_required") return "🟡 未登录";
+  if (status === "error") return "🔴 错误";
+  return "⚪ 未启动";
+}
+
+function agentModelProvider(config: AgentConfig): AgentModelProvider {
+  if (config.modelProvider) return config.modelProvider;
+  if (config.ccSwitchCurrentConfig) return "ccs";
+  return "api";
+}
+
+function agentModelProviderLabel(provider: AgentModelProvider): string {
+  if (provider === "zerotoken") return "Zero Token Web";
+  if (provider === "ccs") return "CCS";
+  if (provider === "deepseek") return "DeepSeek API";
+  return "API Key";
 }
 
 function renderZeroTokenCard(settings: PetSettings): string {
   const zeroToken = settings.zeroToken;
+  const status = zeroTokenStatus?.status ?? "stopped";
+  const selectedProvider = zeroToken.provider || "chatgpt-web";
+  const providers = [
+    ["chatgpt-web", "ChatGPT Web"],
+    ["claude-web", "Claude Web"],
+    ["gemini-web", "Gemini Web"],
+  ] as const;
+  const providerName = providers.find(([id]) => id === selectedProvider)?.[1] || selectedProvider;
   return `
     <section id="zero-token-card" class="zero-token-card" aria-label="Zero Token 模式">
       <div class="zero-token-card__header">
         <div class="zero-token-card__copy">
-          <strong>Zero Token 模式</strong>
-          <small>通过 WebModel 使用网页模型，无需 API Token</small>
+          <strong>Zero Token</strong>
+          <small>通过独立网页登录使用网页模型，无需 API Key</small>
         </div>
         <label class="cute-switch zero-token-card__switch" title="切换 Zero Token 模式">
           <input id="zero-token-enabled" data-setting="zeroTokenEnabled" type="checkbox" ${zeroToken.enabled ? "checked" : ""} />
@@ -2682,23 +2964,20 @@ function renderZeroTokenCard(settings: PetSettings): string {
         </label>
         <span id="zero-token-mode-label" class="zero-token-card__mode">${zeroToken.enabled ? "ON" : "OFF"}</span>
       </div>
-      <p id="zero-token-status" class="zero-token-card__status">${escapeHtml(zeroTokenStatusText(settings))}</p>
-      <div class="zero-token-card__actions">
-        <button id="zero-token-settings-toggle" class="settings-secondary settings-secondary--compact" type="button" aria-expanded="false">设置</button>
-        <button id="zero-token-check" class="settings-secondary settings-secondary--compact" type="button" ${zeroTokenStatusLoading ? "disabled" : ""}>${zeroTokenStatusLoading ? "检测中…" : "检测连接"}</button>
+      <p id="zero-token-status" class="zero-token-card__status">${escapeHtml(zeroTokenRuntimeStatusLabel(status))} · ${escapeHtml(zeroTokenStatusText(settings))}</p>
+      <div class="zero-token-card__settings">
+        <label><span>Provider</span><select data-zero-token-field="provider" aria-label="选择 Zero Token Provider">${providers.map(([id, name]) => `<option value="${id}" ${selectedProvider === id ? "selected" : ""}>${name}</option>`).join("")}</select></label>
+        <div class="zero-token-card__runtime-meta"><span>Provider：${escapeHtml(zeroTokenStatus?.providerName || providerName)}</span><span>状态：${escapeHtml(zeroTokenRuntimeStatusLabel(status))}</span></div>
+        <div class="zero-token-card__actions">
+          <button id="zero-token-check" class="settings-secondary settings-secondary--compact" type="button" ${zeroTokenStatusLoading ? "disabled" : ""}>${zeroTokenStatusLoading ? "检测中…" : "检测登录状态"}</button>
+          <button id="zero-token-login" class="settings-secondary settings-secondary--compact" type="button" ${zeroTokenStatusLoading ? "disabled" : ""}>${status === "ready" ? "重新登录" : "网页登录"}</button>
+          <button id="zero-token-logout" class="settings-secondary settings-secondary--compact" type="button" ${status === "ready" ? "" : "disabled"}>退出登录</button>
+        </div>
       </div>
-      <div id="zero-token-settings-panel" class="zero-token-card__settings" hidden>
-        <label><span>服务地址</span><input data-zero-token-field="baseUrl" type="url" value="${escapeHtml(zeroToken.baseUrl)}" /></label>
-        <label><span>模型（留空自动发现）</span><input data-zero-token-field="model" type="text" value="${escapeHtml(zeroToken.model)}" placeholder="WebModel 当前可用模型" /></label>
-        <label><span>超时</span><input data-zero-token-field="timeout" type="number" min="5000" max="300000" step="1000" value="${zeroToken.timeout}" /><em>毫秒</em></label>
-        <small>WebModel 默认地址为 http://127.0.0.1:3456/v1；启用后由桌宠按需管理本机服务。</small>
-        <button id="zero-token-open-dashboard" class="settings-secondary settings-secondary--wide" type="button">打开 WebModel 控制台</button>
-      </div>
-      <small id="zero-token-hint" class="zero-token-card__hint" ${zeroToken.enabled ? "" : "hidden"}>Zero Token 启用时暂不使用 CCS API 导入；关闭后原 CCS 配置仍会恢复。</small>
+      <small id="zero-token-hint" class="zero-token-card__hint" ${zeroToken.enabled ? "" : "hidden"}>启用后 Agent 使用所选网页 Provider；关闭后原 API/CCS 配置仍会恢复。</small>
     </section>
   `;
 }
-
 function renderAgents(settings: PetSettings): string {
   const configs = cardAgentConfigs(settings);
   return `
@@ -2786,9 +3065,11 @@ function renderAgentAdd(): string {
 function renderAgentDetail(): string {
  if (!agentDetailDraft) return `<div class="agent-detail-empty">未选择 Agent</div>`;
  const config = agentDetailDraft;
-  const discovery = diagnosticDiscovery(config);
-  const source = agentSourceLabel(config);
-  const version = discovery?.version || diagnosticAgentRecord(config).command?.version || "待检查";
+ const discovery = diagnosticDiscovery(config);
+ const source = agentSourceLabel(config);
+ const version = discovery?.version || diagnosticAgentRecord(config).command?.version || "待检查";
+  const selectedModelProvider = agentModelProvider(config);
+  const zeroRuntime = zeroTokenStatus?.runtimeProvider;
   return `
     <div class="settings-page settings-page--agent-detail">
       <div class="settings-title-row">
@@ -2806,6 +3087,17 @@ function renderAgentDetail(): string {
           <small>运行方式：${escapeHtml(agentDescription(config))}</small>
           <small>版本：${escapeHtml(version)}</small>
         </div>
+      </section>
+
+      <section class="agent-detail-form agent-model-provider" aria-label="模型来源">
+        <label class="agent-detail-field"><span>模型来源</span><select data-agent-model-provider="true" aria-label="选择模型来源">
+          <option value="api" ${selectedModelProvider === "api" ? "selected" : ""}>API Key</option>
+          <option value="ccs" ${selectedModelProvider === "ccs" ? "selected" : ""} ${config.ccSwitchCurrentConfig ? "" : "disabled"}>CCS${config.ccSwitchCurrentConfig ? "" : "（未绑定）"}</option>
+          <option value="deepseek" ${selectedModelProvider === "deepseek" ? "selected" : ""}>DeepSeek</option>
+          <option value="zerotoken" ${selectedModelProvider === "zerotoken" ? "selected" : ""}>Zero Token Web</option>
+        </select></label>
+        <small class="agent-model-provider__hint">当前：${escapeHtml(agentModelProviderLabel(selectedModelProvider))}</small>
+        ${selectedModelProvider === "zerotoken" ? `<div class="agent-model-provider__runtime"><strong>Zero Token Web</strong><span>${escapeHtml(zeroTokenRuntimeStatusLabel(zeroRuntime?.status ?? zeroTokenStatus?.status ?? "stopped"))}</span><span>Provider：${escapeHtml(zeroTokenStatus?.providerName || draftSettings?.zeroToken.provider || "未选择")}</span></div>` : ""}
       </section>
 
       <section class="agent-test-panel ${agentTestOk ? "is-ok" : agentTestMessage ? "is-error" : ""}">
@@ -2991,6 +3283,10 @@ function render(animate = true): void {
   contentControl.innerHTML =
     currentPage === "home"
       ? renderHome(draftSettings)
+      : currentPage === "appearance"
+        ? renderAppearancePage(draftSettings)
+      : currentPage === "personalization"
+        ? renderPersonalizationPage(draftSettings)
       : currentPage === "bots"
         ? renderBotCenter(draftSettings)
       : currentPage === "agents"
@@ -2999,10 +3295,16 @@ function render(animate = true): void {
          ? renderAgentAdd()
       : currentPage === "pet-styles"
          ? renderPetStylePage(draftSettings)
-         : currentPage === "perception"
-         ? renderPetPerceptionPage(draftSettings)
+          : currentPage === "perception"
+          ? renderPetPerceptionPage(draftSettings)
+          : currentPage === "perception-detail"
+          ? renderPerceptionDetailPage(draftSettings)
+          : currentPage === "perception-advanced"
+          ? renderPetPerceptionAdvancedPage(draftSettings)
          : currentPage === "memory"
          ? renderMemoryPage()
+         : currentPage === "memory-all"
+         ? renderMemoryAllPage()
          : currentPage === "diagnostics"
         ? renderDiagnostics(draftSettings)
         : currentPage === "data"
@@ -3019,6 +3321,7 @@ function render(animate = true): void {
            ? renderDingTalkSettings(draftSettings)
            : renderAgentDetail();
   enhanceCustomSelects(contentControl);
+  settingsSurface!.dataset.settingsPage = currentPage;
   if (pageChanged) {
     // The settings card is the scroll container. A new page must always start
     // from its own top instead of inheriting the previous page's scroll offset.
@@ -3033,10 +3336,20 @@ function render(animate = true): void {
   backButtonControl.hidden = currentPage === "home";
   const backLabel = currentPage === 'agent-detail' || currentPage === 'agent-add' || currentPage === 'pet-styles'
     ? '返回 Agent 配置'
+    : currentPage === 'appearance'
+      ? '返回设置主页'
+    : currentPage === 'personalization'
+      ? '返回设置主页'
+    : currentPage === 'perception-detail'
+      ? '返回桌宠感知'
+    : currentPage === 'perception-advanced'
+      ? '返回桌宠感知'
     : currentPage === 'perception'
       ? '返回设置主页'
     : currentPage === 'memory'
       ? '返回设置主页'
+    : currentPage === 'memory-all'
+      ? '返回自动记忆'
     : currentPage === 'diagnostics'
       ? '返回设置主页'
     : currentPage === 'data'
@@ -3062,10 +3375,19 @@ function render(animate = true): void {
 function updateSaveStateView(): void {
   const saveState = currentPage === "wechat" || currentPage === "qq" || currentPage === "feishu" || currentPage === "dingtalk"
     ? contentControl.querySelector<HTMLElement>("#bot-task-notification-save-state")
-    : contentControl.querySelector<HTMLElement>(".settings-save-state");
+    : contentControl.querySelector<HTMLElement>("#perception-auto-save-state, .settings-save-state");
   if (saveState) {
-    saveState.classList.toggle("is-dirty", dirty);
-    saveState.textContent = dirty ? "待保存" : "已保存";
+    const perceptionPage = currentPage === "perception" || currentPage === "perception-detail" || currentPage === "perception-advanced";
+    saveState.classList.toggle("is-dirty", perceptionPage ? dirty || perceptionAutoSaveError : dirty);
+    saveState.textContent = perceptionPage
+      ? saving
+        ? "正在保存…"
+        : perceptionAutoSaveError
+          ? "自动保存失败"
+          : dirty
+            ? "正在保存…"
+            : "✓ 已自动保存"
+      : dirty ? "待保存" : "已保存";
   }
 
   const saveButton = contentControl.querySelector<HTMLButtonElement>("#settings-save");
@@ -3080,6 +3402,7 @@ function updateZeroTokenView(): void {
   const card = contentControl.querySelector<HTMLElement>("#zero-token-card");
   if (!card) return;
   const enabled = draftSettings.zeroToken.enabled;
+  const runtimeStatus = zeroTokenStatus?.status ?? "stopped";
   card.classList.toggle("is-enabled", enabled);
   const input = card.querySelector<HTMLInputElement>("#zero-token-enabled");
   if (input) input.checked = enabled;
@@ -3088,17 +3411,29 @@ function updateZeroTokenView(): void {
   const hint = card.querySelector<HTMLElement>("#zero-token-hint");
   if (hint) hint.hidden = !enabled;
   const status = card.querySelector<HTMLElement>("#zero-token-status");
-  if (status) status.textContent = zeroTokenMessage || zeroTokenStatusText(draftSettings);
+  if (status) status.textContent = `${zeroTokenRuntimeStatusLabel(runtimeStatus)} · ${zeroTokenMessage || zeroTokenStatusText(draftSettings)}`;
+  const provider = card.querySelector<HTMLSelectElement>("[data-zero-token-field=provider]");
+  if (provider && provider.value !== draftSettings.zeroToken.provider) provider.value = draftSettings.zeroToken.provider;
+  const providerName = card.querySelector<HTMLElement>(".zero-token-card__runtime-meta span:first-child");
+  if (providerName) providerName.textContent = `Provider：${zeroTokenStatus?.providerName || draftSettings.zeroToken.provider}`;
+  const runtimeMetaStatus = card.querySelector<HTMLElement>(".zero-token-card__runtime-meta span:last-child");
+  if (runtimeMetaStatus) runtimeMetaStatus.textContent = `状态：${zeroTokenRuntimeStatusLabel(runtimeStatus)}`;
   const checkButton = card.querySelector<HTMLButtonElement>("#zero-token-check");
   if (checkButton) {
     checkButton.disabled = zeroTokenStatusLoading;
-    checkButton.textContent = zeroTokenStatusLoading ? "检测中…" : "检测连接";
+    checkButton.textContent = zeroTokenStatusLoading ? "检测中…" : "检测登录状态";
   }
+  const loginButton = card.querySelector<HTMLButtonElement>("#zero-token-login");
+  if (loginButton) {
+    loginButton.disabled = zeroTokenStatusLoading;
+    loginButton.textContent = runtimeStatus === "ready" ? "重新登录" : "网页登录";
+  }
+  const logoutButton = card.querySelector<HTMLButtonElement>("#zero-token-logout");
+  if (logoutButton) logoutButton.disabled = zeroTokenStatusLoading || runtimeStatus !== "ready";
   updateAgentCardListView();
   updateAgentDiscoveryView();
   updateSaveStateView();
 }
-
 async function checkZeroTokenConnectionFromSettings(): Promise<void> {
   if (!draftSettings || zeroTokenStatusLoading) return;
   zeroTokenStatusLoading = true;
@@ -3117,15 +3452,36 @@ async function checkZeroTokenConnectionFromSettings(): Promise<void> {
   }
 }
 
-function updateZeroTokenSetting(field: string, target: HTMLInputElement): void {
-  if (!draftSettings) return;
-  if (field !== "baseUrl" && field !== "model" && field !== "timeout") return;
-  const value = field === "timeout" ? Number(target.value) : target.value;
+async function controlZeroTokenRuntime(action: "login" | "logout"): Promise<void> {
+  if (!draftSettings || zeroTokenStatusLoading) return;
+  zeroTokenStatusLoading = true;
+  zeroTokenMessage = action === "login" ? "正在打开网页登录窗口…" : "正在退出网页登录…";
+  updateZeroTokenView();
+  try {
+    const config = { ...draftSettings.zeroToken };
+    zeroTokenStatus = action === "login"
+      ? await api.zeroToken.login(config, config.provider)
+      : await api.zeroToken.logout(config, config.provider);
+    zeroTokenMessage = zeroTokenStatus.detail;
+  } catch (error) {
+    console.error("Unable to control embedded Zero Token.", error);
+    zeroTokenMessage = error instanceof Error ? error.message : "Zero Token 操作失败";
+    try { zeroTokenStatus = await api.zeroToken.runtime(); } catch { /* retain last status */ }
+  } finally {
+    zeroTokenStatusLoading = false;
+    updateZeroTokenView();
+  }
+}
+
+function updateZeroTokenSetting(field: string, target: HTMLInputElement | HTMLSelectElement): void {
+  if (!draftSettings || field !== "provider") return;
+  const provider = target.value;
+  if (provider !== "chatgpt-web" && provider !== "claude-web" && provider !== "gemini-web") return;
   draftSettings = {
     ...draftSettings,
     zeroToken: {
       ...draftSettings.zeroToken,
-      [field]: value,
+      provider,
     },
   };
   zeroTokenStatus = null;
@@ -3133,7 +3489,6 @@ function updateZeroTokenSetting(field: string, target: HTMLInputElement): void {
   dirty = true;
   updateZeroTokenView();
 }
-
 function updateBotTaskNotificationView(): void {
   if (!draftSettings || !(currentPage === "wechat" || currentPage === "qq" || currentPage === "feishu" || currentPage === "dingtalk")) return;
   const platform = currentPage;
@@ -3165,61 +3520,29 @@ function updateBotTaskNotificationView(): void {
 }
 
 function updatePetPerceptionView(): void {
-  if (currentPage !== "perception" || !draftSettings) return;
-  const status = contentControl.querySelector<HTMLElement>(".perception-status");
-  if (!status) return;
+  if ((currentPage !== "perception" && currentPage !== "perception-detail" && currentPage !== "perception-advanced") || !draftSettings) return;
   const enabled = draftSettings.petPerception.enabled;
-  const statusDetail = dirty
-    ? "修改尚未保存，点击“保存全部”后开始检测"
-    : enabled
-      ? perceptionAgentSummary()
-      : "开启后，企鹅会在状态变化或协同感知完成时回应";
-  status.innerHTML = `
-    <span class="perception-status__dot ${enabled ? "is-on" : ""}"></span>
-    <div><strong>${enabled ? "感知已开启" : "感知未开启"}</strong><small>${statusDetail}</small></div>
-  `;
-  const observation = contentControl.querySelector<HTMLElement>("#perception-observation");
-  if (observation) observation.outerHTML = renderPerceptionObservation(draftSettings, petPerceptionSnapshot);
-  const triggerStatus = contentControl.querySelector<HTMLElement>("#perception-trigger-status");
-  const triggerButton = contentControl.querySelector<HTMLButtonElement>("#trigger-perception");
-  const run = petPerceptionSnapshot?.lastRun;
-  const runRunning = run?.state === "running";
-  const triggerEnabled = draftSettings.petPerception.enabled && !dirty;
-  if (triggerStatus) {
-    triggerStatus.textContent = perceptionTriggerMessage
-      || (dirty ? "请先保存感知开关，再发起协同感知" : run?.detail ?? "输入一个信号，让所有已加入且启用的 Agent 共同处理");
+  if (currentPage === "perception") {
+    const title = contentControl.querySelector<HTMLElement>("#perception-state-title");
+    const dot = contentControl.querySelector<HTMLElement>("#perception-state-dot");
+    const description = contentControl.querySelector<HTMLElement>("#perception-state-description");
+    const toggle = contentControl.querySelector<HTMLInputElement>('input[data-perception-setting="enabled"]');
+    if (title) title.textContent = enabled ? "感知已开启" : "感知未开启";
+    if (dot) dot.classList.toggle("is-on", enabled);
+    if (description) description.textContent = enabled
+      ? "小卡拉米正在了解你的工作状态，\n会在合适的时候主动陪伴你。"
+      : "开启后，小卡拉米会在合适的时候主动陪伴你。";
+    if (toggle) toggle.checked = enabled;
+    const capabilities = contentControl.querySelector<HTMLElement>("#perception-capabilities");
+    if (capabilities) capabilities.innerHTML = renderPerceptionCapabilities(draftSettings);
   }
-  if (triggerButton) {
-    triggerButton.disabled = !triggerEnabled || perceptionTriggerRunning || runRunning;
-    triggerButton.textContent = perceptionTriggerRunning || runRunning ? "感知处理中…" : "让 Agent 参与感知";
+  const sourceSelect = contentControl.querySelector<HTMLSelectElement>('select[data-perception-setting="sourceScope"]');
+  if (sourceSelect) {
+    sourceSelect.value = perceptionSourceScope(draftSettings);
   }
-  const feedbackMode = perceptionFeedbackMode(draftSettings);
-  const feedbackHint = contentControl.querySelector<HTMLElement>("#perception-feedback-mode-hint");
-  if (feedbackHint) feedbackHint.textContent = perceptionFeedbackModeHint(feedbackMode);
-  const sourceScope = perceptionSourceScope(draftSettings);
-  const sourceScopeSelect = contentControl.querySelector<HTMLSelectElement>('select[data-perception-setting="sourceScope"]');
-  if (sourceScopeSelect) sourceScopeSelect.value = sourceScope;
-  const sourceScopeHint = contentControl.querySelector<HTMLElement>("#perception-source-scope-hint");
-  if (sourceScopeHint) sourceScopeHint.textContent = perceptionSourceScopeHint(sourceScope);
-  const sourceSummary = contentControl.querySelector<HTMLElement>("#perception-source-summary");
-  if (sourceSummary) sourceSummary.textContent = `${perceptionSourceSummary(draftSettings)} · 上方选择会同步这些来源`;
-  const digestMode = perceptionDigestMode(draftSettings);
-  const digestSelect = contentControl.querySelector<HTMLSelectElement>('select[data-perception-setting="digestMode"]');
-  if (digestSelect) digestSelect.value = digestMode;
-  const digestHint = contentControl.querySelector<HTMLElement>("#perception-digest-mode-hint");
-  if (digestHint) digestHint.textContent = perceptionDigestModeHint(digestMode);
-  const statusLightMotion = draftSettings.petPerception.statusLightMotion ?? "static";
-  const statusLightPreview = contentControl.querySelector<HTMLElement>(".perception-motion-preview");
-  if (statusLightPreview) {
-    statusLightPreview.dataset.motion = statusLightMotion;
-    statusLightPreview.setAttribute("aria-label", `${petStatusLightMotionLabel(statusLightMotion)} 预览`);
-  }
-  const statusLightHint = contentControl.querySelector<HTMLElement>("#perception-status-light-mode-label");
-  if (statusLightHint) statusLightHint.textContent = petStatusLightMotionHint(statusLightMotion);
   contentControl.querySelectorAll<HTMLInputElement | HTMLSelectElement>("input[data-perception-setting], select[data-perception-setting]").forEach((input) => {
     const setting = input.dataset.perceptionSetting;
-    const longTaskSetting = setting === "longTaskReplyIntervalSeconds" || setting === "longTaskReplyTemplate";
-    input.disabled = setting !== "enabled" && (!enabled || (longTaskSetting && !draftSettings?.petPerception.longTaskReplyEnabled));
+    if (setting !== "enabled") input.disabled = !enabled;
   });
   customSelectWrappers().forEach(syncCustomSelect);
   updateSaveStateView();
@@ -3258,7 +3581,7 @@ async function refreshPetPerception(): Promise<void> {
 
 function updatePetStyleView(): void {
   if (!draftSettings) return;
-  if (currentPage === "home") {
+  if (currentPage === "home" || currentPage === "appearance") {
     const region = contentControl.querySelector<HTMLElement>("#pet-style-settings");
     if (region) region.outerHTML = renderPetStylePicker(draftSettings);
     return;
@@ -4083,6 +4406,7 @@ function updateDraft(update: Partial<PetSettings>): void {
   if (!draftSettings) return;
   draftSettings = { ...draftSettings, ...update };
   dirty = true;
+  perceptionAutoSaveError = false;
   updateSaveStateView();
 }
 
@@ -4095,15 +4419,25 @@ async function saveAll(): Promise<boolean> {
     persistedSettings = cloneSettings(saved);
     draftSettings = cloneSettings(saved);
     dirty = false;
+    perceptionAutoSaveError = false;
     return true;
   } catch (error) {
     console.error("Unable to save pet settings.", error);
+    perceptionAutoSaveError = true;
     await showNotice("保存失败", "设置保存失败，请稍后重试。");
     return false;
   } finally {
     saving = false;
     updateSaveStateView();
   }
+}
+
+function schedulePerceptionAutoSave(): void {
+  if (perceptionAutoSaveTimer !== null) window.clearTimeout(perceptionAutoSaveTimer);
+  perceptionAutoSaveTimer = window.setTimeout(() => {
+    perceptionAutoSaveTimer = null;
+    if (draftSettings?.petPerception) void saveAll();
+  }, 260);
 }
 
 function applyPetStyleActionResult(result: { settings?: PetSettings; style?: PetStyle }): void {
@@ -4753,6 +5087,7 @@ async function handleSettingChange(target: HTMLInputElement | HTMLSelectElement 
         },
       });
       updatePetPerceptionView();
+      schedulePerceptionAutoSave();
       return;
     }
     if (rawPerceptionKey === "feedbackMode" && target instanceof HTMLSelectElement) {
@@ -4770,6 +5105,7 @@ async function handleSettingChange(target: HTMLInputElement | HTMLSelectElement 
         },
       });
       updatePetPerceptionView();
+      schedulePerceptionAutoSave();
       return;
     }
     if (rawPerceptionKey === "digestMode" && target instanceof HTMLSelectElement) {
@@ -4780,6 +5116,7 @@ async function handleSettingChange(target: HTMLInputElement | HTMLSelectElement 
         },
       });
       updatePetPerceptionView();
+      schedulePerceptionAutoSave();
       return;
     }
     const perceptionKey = rawPerceptionKey as keyof PetPerceptionSettings;
@@ -4795,6 +5132,7 @@ async function handleSettingChange(target: HTMLInputElement | HTMLSelectElement 
       },
     });
     updatePetPerceptionView();
+    schedulePerceptionAutoSave();
     return;
   }
 
@@ -5134,18 +5472,16 @@ async function refreshMemory(successMessage = "记忆列表已更新"): Promise<
   if (memoryLoading) return;
   memoryLoading = true;
   memoryMessage = "";
-  if (currentPage === "memory") render(false);
+  if (currentPage === "memory" || currentPage === "memory-all") render(false);
   try {
-    const [summary, entries] = await Promise.all([api.memory.summary(), api.memory.list()]);
-    memorySummary = summary;
-    memoryEntries = entries;
+    memoryEntries = await api.memory.list();
     memoryMessage = successMessage;
   } catch (error) {
     console.error("Unable to load memory.", error);
     memoryMessage = "记忆读取失败，请稍后重试。";
   } finally {
     memoryLoading = false;
-    if (currentPage === "memory") render(false);
+    if (currentPage === "memory" || currentPage === "memory-all") render(false);
   }
 }
 
@@ -5153,7 +5489,7 @@ async function organizeRecentMemory(): Promise<void> {
   if (memoryLoading || memoryOrganizing) return;
   memoryOrganizing = true;
   memoryMessage = "正在重整理现有记忆和最近对话…";
-  if (currentPage === "memory") render(false);
+  if (currentPage === "memory" || currentPage === "memory-all") render(false);
   try {
     const result = await api.memory.rebuildRecent();
     await refreshMemory(result.detail);
@@ -5162,7 +5498,7 @@ async function organizeRecentMemory(): Promise<void> {
     memoryMessage = "记忆重整理失败，请稍后重试。";
   } finally {
     memoryOrganizing = false;
-    if (currentPage === "memory") render(false);
+    if (currentPage === "memory" || currentPage === "memory-all") render(false);
   }
 }
 
@@ -5173,7 +5509,7 @@ async function updateMemoryEntry(action: "approve" | "reject" | "remove", id: st
 
 async function clearMemory(): Promise<void> {
   if (memoryEntries.length === 0) return;
-  if (!(await showConfirm("清空长期记忆", "确认删除所有已确认记忆和待审核候选吗？聊天原文不会受影响。", { confirmLabel: "清空", danger: true }))) return;
+  if (!(await showConfirm("清除全部记忆", "确认删除桌宠已经了解的所有内容吗？聊天原文不会受影响。", { confirmLabel: "删除", danger: true }))) return;
   const result = await api.memory.clear();
   await refreshMemory(result.detail);
 }
@@ -5284,6 +5620,12 @@ contentControl.addEventListener("click", (event) => {
 
   if (target.closest("#open-bot-center")) {
     currentPage = "bots";
+    render();
+    return;
+  }
+
+  if (target.closest("#open-appearance-settings")) {
+    currentPage = "appearance";
     render();
     return;
   }
@@ -5497,29 +5839,18 @@ contentControl.addEventListener("click", (event) => {
     return;
   }
 
-  if (target.closest("#zero-token-settings-toggle")) {
-    const toggle = contentControl.querySelector<HTMLButtonElement>("#zero-token-settings-toggle");
-    const panel = contentControl.querySelector<HTMLElement>("#zero-token-settings-panel");
-    if (toggle && panel) {
-      panel.hidden = !panel.hidden;
-      toggle.setAttribute("aria-expanded", String(!panel.hidden));
-    }
-    return;
-  }
-
   if (target.closest("#zero-token-check")) {
     void checkZeroTokenConnectionFromSettings();
     return;
   }
-
-  if (target.closest("#zero-token-open-dashboard")) {
-    if (!draftSettings) return;
-    void api.zeroToken.openDashboard({ ...draftSettings.zeroToken }).then(async (result) => {
-      if (!result.ok) await showNotice("WebModel 控制台", result.detail);
-    });
+  if (target.closest("#zero-token-login")) {
+    void controlZeroTokenRuntime("login");
     return;
   }
-
+  if (target.closest("#zero-token-logout")) {
+    void controlZeroTokenRuntime("logout");
+    return;
+  }
   if (target.closest("#open-agent-add")) {
     currentPage = "agent-add";
     render();
@@ -5624,9 +5955,44 @@ contentControl.addEventListener("keydown", (event) => {
 contentControl.addEventListener("change", (event) => {
   const target = event.target;
   if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement)) return;
-  const zeroTokenField = target instanceof HTMLInputElement ? target.dataset.zeroTokenField : undefined;
+  const personalizationSetting = target.dataset.personalizationSetting;
+  if (personalizationSetting === "replyStyle" && target instanceof HTMLSelectElement) {
+    const value = target.value as ReplyStyle;
+    if (value in REPLY_STYLE_LABELS) {
+      replyStyle = value;
+      localStorage.setItem(PERSONALIZATION_REPLY_STYLE_KEY, value);
+    }
+    return;
+  }
+  if (personalizationSetting === "autoMemory" && target instanceof HTMLInputElement && target.type === "checkbox") {
+    autoMemoryEnabled = target.checked;
+    localStorage.setItem(PERSONALIZATION_AUTO_MEMORY_KEY, autoMemoryEnabled ? "on" : "off");
+    const title = contentControl.querySelector<HTMLElement>("[data-auto-memory-title]");
+    if (title) title.textContent = autoMemoryEnabled ? "自动记忆已开启" : "自动记忆已关闭";
+    return;
+  }
+  if (target instanceof HTMLSelectElement && target.dataset.agentModelProvider && agentDetailDraft && draftSettings) {
+    const value = target.value as AgentModelProvider;
+    if (value === "api" || value === "ccs" || value === "deepseek" || value === "zerotoken") {
+      agentDetailDraft = { ...agentDetailDraft, modelProvider: value };
+      draftSettings = {
+        ...draftSettings,
+        agentConfigs: draftSettings.agentConfigs.map((config) => config.id === agentDetailDraft?.id
+          ? { ...config, modelProvider: value }
+          : config),
+        zeroToken: value === "zerotoken" && !draftSettings.zeroToken.enabled
+          ? { ...draftSettings.zeroToken, enabled: true }
+          : draftSettings.zeroToken,
+      };
+      dirty = true;
+      updateSaveStateView();
+      if (value === "zerotoken" && draftSettings.zeroToken.enabled) void checkZeroTokenConnectionFromSettings();
+    }
+    return;
+  }
+  const zeroTokenField = target instanceof HTMLInputElement || target instanceof HTMLSelectElement ? target.dataset.zeroTokenField : undefined;
   if (zeroTokenField) {
-    if (!(target instanceof HTMLInputElement)) return;
+    if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLSelectElement)) return;
     updateZeroTokenSetting(zeroTokenField, target);
     return;
   }
@@ -5711,10 +6077,20 @@ backButtonControl.addEventListener("click", () => {
     currentPage = "agents";
   } else if (currentPage === "pet-styles") {
     currentPage = "home";
+  } else if (currentPage === "appearance") {
+    currentPage = "home";
+  } else if (currentPage === "personalization") {
+    currentPage = "home";
+  } else if (currentPage === "perception-detail") {
+    currentPage = "perception";
+  } else if (currentPage === "perception-advanced") {
+    currentPage = "perception";
   } else if (currentPage === "perception") {
     currentPage = "home";
   } else if (currentPage === "memory") {
     currentPage = "home";
+  } else if (currentPage === "memory-all") {
+    currentPage = "memory";
   } else if (currentPage === "diagnostics") {
     currentPage = "home";
   } else if (currentPage === "about") {
@@ -5881,12 +6257,51 @@ contentControl.addEventListener("click", (event) => {
     void refreshPetPerception();
     return;
   }
+  const perceptionAction = target.closest<HTMLElement>("[data-perception-action]")?.dataset.perceptionAction;
+  if (perceptionAction) {
+    if (perceptionAction === "advanced") {
+      currentPage = "perception-advanced";
+    } else if (perceptionAction === "companion" || perceptionAction === "interaction" || perceptionAction === "task-feedback" || perceptionAction === "position" || perceptionAction === "movement" || perceptionAction === "status-light") {
+      perceptionDetail = perceptionAction;
+      currentPage = "perception-detail";
+    } else {
+      return;
+    }
+    render();
+    void refreshPetPerception();
+    return;
+  }
+  if (target.closest("#open-perception-advanced")) {
+    currentPage = "perception-advanced";
+    render();
+    void refreshPetPerception();
+    return;
+  }
+  if (target.closest("#open-personalization")) {
+    currentPage = "personalization";
+    render();
+    return;
+  }
+  if (target.closest("#open-auto-memory")) {
+    currentPage = "memory";
+    memoryMessage = "";
+    render();
+    void refreshMemory();
+    return;
+  }
   if (target.closest("#trigger-perception")) {
     void triggerPerception();
     return;
   }
   if (target.closest("#open-memory")) {
     currentPage = "memory";
+    memoryMessage = "";
+    render();
+    void refreshMemory();
+    return;
+  }
+  if (target.closest("#open-all-memory")) {
+    currentPage = "memory-all";
     memoryMessage = "";
     render();
     void refreshMemory();
@@ -5977,17 +6392,15 @@ contentControl.addEventListener("click", (event) => {
   }
 });
 
-const unsubscribeMemory = api.memory.subscribe((summary) => {
-  memorySummary = summary;
-  if (currentPage === "memory") {
+const unsubscribeMemory = api.memory.subscribe(() => {
+  if (currentPage === "memory" || currentPage === "memory-all") {
     void refreshMemory();
-  } else if (currentPage === "home") {
-    render(false);
   }
 });
 
 const unsubscribeSettings = api.settings.subscribe((settings) => {
   const next = cloneSettings(settings);
+  void syncMascotAsset(next);
   // A broadcast caused by our own save echoes identical settings. Rebuilding
   // the whole page for that echo resets scroll/focus and replays the page and
   // mascot animations, which looks like a global refresh. Only re-render when
