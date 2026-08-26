@@ -296,6 +296,8 @@ let zeroTokenMessage = "";
 let updateResult: UpdateCheckResult | null = null;
 let updateChecking = false;
 let updateMessage = "";
+type UpdateFeedbackState = "idle" | "checking" | "current" | "available" | "error";
+let updateFeedbackState: UpdateFeedbackState = "idle";
 interface AgentDiagnosticRecord {
   command: AgentTestResult | null;
   health: AgentHealthCheckResult | null;
@@ -2099,9 +2101,10 @@ function aboutVersionLabel(): string {
 
 function renderAboutUpdateCard(): string {
   const result = updateResult;
+  const updateState = updateChecking ? "checking" : updateFeedbackState;
   const detail = updateChecking
-    ? "正在读取更新清单…"
-    : updateMessage || result?.detail || "尚未检查";
+    ? "正在检查 GitHub 更新…"
+    : updateMessage || result?.detail || "尚未检查 GitHub 更新";
   const versionSummary = result?.latestVersion
     ? `当前 v${escapeHtml(result.currentVersion)} · 最新 v${escapeHtml(result.latestVersion)}`
     : `当前 v${escapeHtml(aboutVersionLabel())}`;
@@ -2111,11 +2114,11 @@ function renderAboutUpdateCard(): string {
   return `
     <section id="about-update-card" class="about-card about-card--update">
       <div class="about-card__header">
-        <div><strong>程序升级</strong><small id="about-update-version">${versionSummary}</small></div>
+        <div><strong>程序升级</strong><small id="about-update-version">${versionSummary}</small><small class="about-card__source">更新源：GitHub 公共仓库</small></div>
         <button id="check-updates" class="settings-secondary settings-secondary--compact" type="button" ${updateChecking ? "disabled" : ""}>${updateChecking ? "检查中…" : "检查更新"}</button>
       </div>
-      <div id="about-update-status" class="about-card__status ${result?.state === "available" ? "is-highlight" : ""}">
-        <span id="about-update-detail">${escapeHtml(detail)}</span>
+      <div id="about-update-status" class="about-card__status" data-update-state="${updateState}">
+        <span class="about-card__status-copy"><span class="about-card__status-indicator" aria-hidden="true"></span><span id="about-update-detail" role="status" aria-live="polite">${escapeHtml(detail)}</span></span>
         ${result?.releasePageUrl ? `<button id="open-update-download" class="settings-secondary settings-secondary--compact" type="button">打开下载页</button>` : ""}
       </div>
       <ul id="about-update-notes" class="about-card__notes" ${result?.releaseNotes.length ? "" : "hidden"}>${result?.releaseNotes.map((note) => `<li>${escapeHtml(note)}</li>`).join("") ?? ""}</ul>
@@ -3764,12 +3767,17 @@ function updateAboutView(): void {
   const updateDetail = contentControl.querySelector<HTMLElement>("#about-update-detail");
   if (updateDetail) {
     updateDetail.textContent = updateChecking
-      ? "正在读取更新清单…"
-      : updateMessage || updateResult?.detail || "尚未检查";
+      ? "正在检查 GitHub 更新…"
+      : updateMessage || updateResult?.detail || "尚未检查 GitHub 更新";
   }
   const updateStatus = contentControl.querySelector<HTMLElement>("#about-update-status");
   if (updateStatus) {
-    updateStatus.classList.toggle("is-highlight", updateResult?.state === "available");
+    const updateState = updateChecking ? "checking" : updateFeedbackState;
+    updateStatus.dataset.updateState = updateState;
+    updateStatus.classList.toggle("is-highlight", updateState === "available");
+    updateStatus.classList.toggle("is-checking", updateState === "checking");
+    updateStatus.classList.toggle("is-current", updateState === "current");
+    updateStatus.classList.toggle("is-error", updateState === "error");
     const existingDownloadButton = updateStatus.querySelector<HTMLButtonElement>("#open-update-download");
     if (updateResult?.releasePageUrl && !existingDownloadButton) {
       updateStatus.insertAdjacentHTML("beforeend", `<button id="open-update-download" class="settings-secondary settings-secondary--compact" type="button">打开下载页</button>`);
@@ -3869,14 +3877,22 @@ async function syncCcSwitchProfiles(): Promise<void> {
 async function checkForUpdates(): Promise<void> {
   if (updateChecking) return;
   updateChecking = true;
-  updateMessage = "正在检查更新清单…";
+  updateFeedbackState = "checking";
+  updateResult = null;
+  updateMessage = "正在检查 GitHub 更新…";
   updateAboutView();
   try {
     updateResult = await api.updates.check();
     updateMessage = updateResult.detail;
+    updateFeedbackState = updateResult.state === "available"
+      ? "available"
+      : updateResult.state === "current"
+        ? "current"
+        : "error";
   } catch (error) {
     console.error("Unable to check for updates.", error);
     updateResult = null;
+    updateFeedbackState = "error";
     updateMessage = "更新检查失败，请稍后重试。";
   } finally {
     updateChecking = false;
@@ -3887,9 +3903,23 @@ async function checkForUpdates(): Promise<void> {
 async function openUpdateDownload(): Promise<void> {
   const releasePageUrl = updateResult?.releasePageUrl;
   if (!releasePageUrl) return;
-  const result = await api.updates.openDownload(releasePageUrl);
-  if (!result.ok) {
-    updateMessage = result.detail;
+  updateFeedbackState = "checking";
+  updateMessage = "正在打开 GitHub 下载页…";
+  updateAboutView();
+  try {
+    const result = await api.updates.openDownload(releasePageUrl);
+    if (result.ok) {
+      updateMessage = "已打开 GitHub 下载页";
+      updateFeedbackState = updateResult?.state === "available" ? "available" : "current";
+    } else {
+      updateMessage = result.detail;
+      updateFeedbackState = "error";
+    }
+  } catch (error) {
+    console.error("Unable to open update download page.", error);
+    updateMessage = "下载页打开失败，请稍后重试。";
+    updateFeedbackState = "error";
+  } finally {
     updateAboutView();
   }
 }

@@ -79,13 +79,13 @@ function manifestResult(currentVersion: string, manifest: UnknownRecord): Update
   };
 }
 
-const DEFAULT_UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/501hahaha/PenguinDesktopPet/main/update-manifest.json";
+export const GITHUB_UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/501hahaha/PenguinDesktopPet/main/update-manifest.json";
 
 function manifestUrls(): string[] {
   return [
     process.env.PENGUIN_UPDATE_MANIFEST_URL,
     process.env.PENGUIN_UPDATE_MIRROR_MANIFEST_URL,
-    DEFAULT_UPDATE_MANIFEST_URL,
+    GITHUB_UPDATE_MANIFEST_URL,
   ]
     .filter((value): value is string => typeof value === "string" && Boolean(value.trim()))
     .map((value) => safeHttpsUrl(value))
@@ -112,7 +112,11 @@ export async function checkForUpdate(currentVersion: string): Promise<UpdateChec
   let lastError = "更新清单暂不可用";
   for (const url of urls) {
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(8_000), headers: { accept: "application/json" } });
+      const response = await fetch(url, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(8_000),
+        headers: { accept: "application/json", "cache-control": "no-cache" },
+      });
       if (!response.ok) {
         lastError = `更新清单请求失败（${response.status}）`;
         continue;

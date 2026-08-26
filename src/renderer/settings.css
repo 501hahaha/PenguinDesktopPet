@@ -2315,6 +2315,11 @@ button.setting-row {
   line-height: 1.5;
 }
 
+.about-card__source {
+  color: #7c83a9;
+  font-size: 9px;
+}
+
 .about-card__status {
   display: flex;
   align-items: center;
@@ -2329,9 +2334,52 @@ button.setting-row {
   line-height: 1.45;
 }
 
+.about-card__status-copy {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.about-card__status-copy > span:last-child {
+  min-width: 0;
+}
+
+.about-card__status-indicator {
+  flex: 0 0 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #aeb4c8;
+}
+
+.about-card__status.is-checking .about-card__status-indicator {
+  background: #7799da;
+  box-shadow: 0 0 0 3px rgba(119, 153, 218, 0.14);
+  animation: about-update-pulse 1.1s ease-in-out infinite;
+}
+
+.about-card__status.is-current .about-card__status-indicator {
+  background: #4db68c;
+}
+
+.about-card__status.is-error .about-card__status-indicator {
+  background: #df8d8d;
+}
+
 .about-card__status.is-highlight {
   color: #596a86;
   background: rgba(220, 236, 246, 0.8);
+}
+
+.about-card__status.is-highlight .about-card__status-indicator {
+  background: #5f9fe0;
+}
+
+@keyframes about-update-pulse {
+  0%,
+  100% { opacity: 0.55; transform: scale(0.82); }
+  50% { opacity: 1; transform: scale(1); }
 }
 
 .about-card__notes {
